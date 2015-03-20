@@ -43,7 +43,7 @@ import core.stdc.stdlib : malloc, free;
 
 import raider.tools.array;
 
-//Evaluates true if an aggregate type has GC-scannable fields.
+//Evaluates true if a type T has GC-scannable fields.
 template hasGarbage(T)
 {
 	template Impl(T...)
@@ -60,8 +60,8 @@ template hasGarbage(T)
 		else
 			enum Impl = hasIndirections!(T[0]) || Impl!(T[1 .. $]);
 
-		//TODO Allow weak references to break cycles.
-		/* 
+		/*FIXME Allow weak references to break cycles.
+		 * 
 		 * Reference template evaluation fails when
 		 * references form a cycle. T.tupleof fails 
 		 * because T is a forward reference.
@@ -118,12 +118,14 @@ version(unittest)
 	}
 }
 
-private template Box(T)
+//EnCAPsulation allows to use structs as if they were classes.
+private template Cap(T)
 {
-	static if(is(T == class) || is(T == interface)) alias T Box;
+	static if(is(T == class) || is(T == interface))
+		alias T Cap;
 	else static if(is(T == struct) || isScalarType!T)
 	{
-		class Box
+		class Cap
 		{
 			T _t; alias _t this;
 			static if(is(T == struct))
@@ -153,7 +155,7 @@ private struct Header(string C = "")
 /**
  * Allocates and constructs a reference counted object.
  * 
- * Boxes structs and scalar types.
+ * Encapsulates structs and scalar types.
  */
 public R!T New(T, Args...)(auto ref Args args)
 	if(is(T == class) || is(T == struct) || isScalarType!T)
@@ -162,7 +164,7 @@ public R!T New(T, Args...)(auto ref Args args)
 	//For some reason, emplace doesn't.
 	if(false) static if(is(T == class)) T t = new T(args);
 
-	enum size = __traits(classInstanceSize, Box!T);
+	enum size = __traits(classInstanceSize, Cap!T);
 	
 	//Allocate space for the header + object
 	void* m = malloc(Header!().sizeof + size);
@@ -184,7 +186,7 @@ public R!T New(T, Args...)(auto ref Args args)
 
 	//Construct with emplace
 	R!T result;
-	result._referent = emplace!(Box!T)(chunk[0..size], args);
+	result._referent = emplace!(Cap!T)(chunk[0..size], args);
 	return result;
 }
 
@@ -227,8 +229,9 @@ public R!Object New(in char[] classname)
 	//Default-construct (if it has one)
 	if(ci.m_flags & 8 && ci.defaultConstructor)
 	{
-		alias ci.defaultConstructor dctor;
-		//dctor(cast(Object)chunk);
+		//This fails for some reason. Source says defaultConstructor is void function(Object)..
+		//static assert(is(typeof(ci.defaultConstructor) == void function(Object)));
+		//ci.defaultConstructor(cast(Object)chunk);
 	}
 
 	result._void = chunk;
@@ -302,7 +305,7 @@ if(C == "R" || C == "W" || C == "P")
 	struct Reference(T)
 	if(is(T == class) || is(T == interface) || is(T == struct) || isScalarType!T)
 	{ private:
-		alias Box!T B;
+		alias Cap!T B;
 
 		//Referent
 		union { public B _referent = null; void* _void; }
@@ -321,24 +324,35 @@ if(C == "R" || C == "W" || C == "P")
 			{
 				return _referent[args];
 			}
+
+			//Casts to a pointer, for convenience.
+			@property P!T p() { return P!T(_referent); }
 		}
 		//..Unless it's weak
 		else
 			@property R!T strengthen() { return R!T(_referent); }
 
+		//When assert is off, pointer references do not incref or decref.
+		version(assert) { enum hasRefSem = true; }
+		else { enum hasRefSem = (C != "P"); }
+
+
 		//Incref/decref semantics
-		this(this) { _incref; }
-		~this() { _decref;  }
+		static if(hasRefSem)
+		{
+			this(this) { _incref; }
+			~this() { _decref;  }
+		}
 
 		//Construct weak and pointer refs from a raw ref
 		static if(C != "R")
-			this(B that) { _referent = that; _incref; }
+		this(B that) { _referent = that; static if(hasRefSem) { _incref; } }
 
 		//Assign null
 		void opAssign(typeof(null) wut)
 		{
-			static if(C == "P") { version(assert) { _decref; _referent = null; } }
-			else { _decref; _referent = null; }
+			static if(hasRefSem) { _decref; }
+			_referent = null;
 		}
 
 		void opAssign(D, A:T)(D!A rhs) if(isInstanceOf(D, Reference))
@@ -373,47 +387,46 @@ if(C == "R" || C == "W" || C == "P")
 
 	private:
 
-		//Incref / decref
-		void _incref()
+		static if(hasRefSem)
 		{
-			if(_referent) atomicOp!"+="(header.count, 1);
-		}
-		
-		void _decref()
-		{
-			/* Let us discuss lockless weak references
-			 * 
-			 * There are three rules:
-			 * - The object is destructed when refs reach 0.
-			 * - The memory is freed when refs and wefs reach 0.
-			 * - Must be destructed and freed once, in that order.
-			 * 
-			 * Decref:
-			 * If no more refs, dtor and set refs max.
-			 * If no more refs OR wefs, do as above, then 
-			 * decwef. If wefs max, free.
-			 * 
-			 * Decwef:
-			 * If no more wefs, and refs max,
-			 * decwef. If wefs max, free.
-			 * 
-			 * You are not expected to understand this.
-			 * Or its implementation.
-			 * I sure don't.
-			 */
-
-			if(_referent)
+			//Incref / decref
+			void _incref()
 			{
-				//CAS the whole header, we need atomicity
-				Header!C get, set;
-				
-				do {
-					get = set = atomicLoad(header);
-					set.count -= 1; }
-				while(!cas(&header(), get, set));
-
-				static if(C != "P")
+				if(_referent) atomicOp!"+="(header.count, 1);
+			}
+			
+			void _decref()
+			{
+				/* Let us discuss lockless weak references
+				 * 
+				 * There are three rules:
+				 * - The object is destructed when refs reach 0.
+				 * - The memory is freed when refs and wefs reach 0.
+				 * - Must be destructed and freed once, in that order.
+				 * 
+				 * Decref:
+				 * If no more refs, dtor and set refs max.
+				 * If no more refs OR wefs, do as above, then 
+				 * decwef. If wefs max, free.
+				 * 
+				 * Decwef:
+				 * If no more wefs, and refs max,
+				 * decwef. If wefs max, free.
+				 * 
+				 * You are not expected to understand this.
+				 * Or its implementation.
+				 * I sure don't.
+				 */
+				if(_referent)
 				{
+					//CAS the whole header, we need atomicity
+					Header!C get, set;
+					
+					do {
+						get = set = atomicLoad(header);
+						set.count -= 1; }
+					while(!cas(&header(), get, set));
+
 					if(set.count == 0)
 					{
 						static if(C == "R")
