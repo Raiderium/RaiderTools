@@ -1,14 +1,14 @@
 {
     "name": "raider-tools",
+    "version": "0.0.1",
     "description": "A small library of tools in D.",
     "homepage": "https://github.com/Raiderium/RaiderTools",
     "license": "MIT",
     "authors": ["Aiden Sibley"],
-
     "targetName": "RaiderTools",
     "targetPath": "lib",
 
 	"dependencies": { 
-		"derelict-physfs": "~master",
+		"derelict-physfs": ">0.0.0",
 	}
 }
