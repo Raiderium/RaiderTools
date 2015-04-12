@@ -40,9 +40,11 @@ struct Array(T)
 public:
 
 	//Construct from variadic item list
-	this(L...)(L list)
+	//Recursive form allows the items to be implicitly coerced, e.g., int literals to uint.
+	this()() { }
+	this(L...)(T item, L list)
 	{
-		foreach(item; list) add(item);
+		add(item); this(list);
 	}
 
 	//Construct a copy. Invokes item copy constructor
@@ -93,11 +95,10 @@ public:
 	 * once?
 	 * 
 	 * The first situation occurs when an array is cleared 
-	 * and refilled each frame, for instance, to store 
-	 * collision data. This is addressed by the 'cache' 
-	 * feature, which stops capacity from decreasing.
-	 * (The user may wish to re-cache intermittently 
-	 * to stop spikes consuming all available space.)
+	 * and refilled in each frame of a game, for instance, 
+	 * to store collision data. This is addressed by the 
+	 * 'cache' flag (not implemented yet), which stops 
+	 * capacity from decreasing.
 	 * 
 	 * The second situation /was/ addressed by the 'snuggle'
 	 * feature, which removed the allocation margin
@@ -270,7 +271,7 @@ public:
 		 * Sorts the array.
 		 * 
 		 * Sorting algorithm is Introsort (std.algorithm.sort with SwapStrategy.unstable)
-		 * It does not allocate.
+		 * It is unstable and does not allocate.
 		 */
 		void sort()
 		{
@@ -460,11 +461,107 @@ public:
 		result ~= "]";
 		return result;
 	}
+
+	/**
+	 * Sort array using 32-bit radix sort.
+	 * Implementation based on http://stereopsis.com/radix.html
+	 * 
+	 * This is not an in-place sort. It needs scratch space to
+	 * work with; provide an array of the same type and it will
+	 * take care of it. Pass the same scratch array in to boost
+	 * performance over multiple sorts. Note the interior data
+	 * pointer is currently swapped with the scratch array.
+	 * 
+	 * Sorts on a uint or float field of T, specified by 'field'.
+	 * See unittests for usage examples. If no field is given,
+	 * it sorts on T, which must be uint or float.
+	 */
+	void radixSort(alias field = "a")(ref Array!T scratch)
+	{
+		scratch.resize(_size); //no-op on repeat invocations
+
+		//11-bit histograms on stack
+		immutable uint kb = 2048;
+		uint b[kb * 3];
+		uint* b0 = b.ptr;
+		uint* b1 = b0 + kb;
+		uint* b2 = b1 + kb;
+		
+		//Create histograms
+		for(int x = 0; x < _size; x++)
+		{
+			T a = data[x];
+			mixin("auto p = &(" ~ field ~ ");");
+			uint i = *cast(uint*)p;
+
+			//Assert field is uint or float
+			static assert(is(typeof(*p) == float) || is(typeof(*p) == uint));
+
+			static if(is(typeof(*p) == float))
+			{
+				//Flip float
+				int m = i >> 31;
+				i ^= -m | 0x80000000;
+			}
+
+			b0[i & 0x7FF]++;
+			b1[i >> 11 & 0x7FF]++;
+			b2[i >> 22]++;
+		}
+		
+		//Convert to cumulative histograms
+		uint s0, s1, s2, st;
+		for(int x = 0; x < kb; x++) { st = b0[x] + s0; b0[x] = s0 - 1; s0 = st; }
+		for(int x = 0; x < kb; x++) { st = b1[x] + s1; b1[x] = s1 - 1; s1 = st; }
+		for(int x = 0; x < kb; x++) { st = b2[x] + s2; b2[x] = s2 - 1; s2 = st; }
+
+		//Sort pass 1 (copies items to scratch with 11 bits sorted)
+		for(int x = 0; x < _size; x++)
+		{
+			T a = data[x];
+			mixin("auto p = &(" ~ field ~ ");");
+			uint* i = cast(uint*)p;
+
+			//Flip float
+			static if(is(typeof(*p) == float)) { int m = *i >> 31; *i ^= -m | 0x80000000; }
+
+			uint pos = *i & 0x7FF;
+			scratch[++b0[pos]] = a;
+		}
+
+		//Pass 2 (copies items back to source with 22 bits sorted)
+		for(int x = 0; x < _size; x++)
+		{
+			T a = scratch[x];
+			mixin("uint i = *cast(uint*)&(" ~ field ~ ");");
+			uint pos = i >> 11 & 0x7FF;
+			data[++b1[pos]] = a;
+		}
+
+		//Pass 3 (copies to scratch again with all 32 bits sorted)
+		for(int x = 0; x < _size; x++)
+		{
+			T a = data[x];
+			mixin("auto p = &(" ~ field ~ ");");
+			uint* i = cast(uint*)p;
+			uint pos = *i >> 22;
+
+			//Unflip float
+			static if(is(typeof(*p) == float)) { uint m = ((*i >> 31) - 1) | 0x80000000; *i ^= m; }
+
+			scratch[++b2[pos]] = a;
+		}
+
+		//Swap arrays so data points to sorted items
+		swap(data, scratch.data);
+		//TODO Investigate consequences of swapping _other.
+		swap(_other, scratch._other);
+	}
 }
 
 unittest
 {
-	Array!int a1;
+	Array!uint a1;
 
 	a1.add(1);
 	assert(a1[0] == 1);
@@ -485,7 +582,7 @@ unittest
 	assert(a1.contains(1));
 
 	//Variadic construction
-	a1 = Array!int(1, 2, 3, 4, 5);
+	a1 = Array!uint(1, 2, 3, 4, 5);
 
 	assert(a1.contains(1));
 	assert(a1.contains(2));
@@ -499,12 +596,35 @@ unittest
 	assert(a1.toString == "[1, 3, 4, 5]");
 
 	//Sort
-	a1 = Array!int(5, 2, 3, 4, 1, 1, 5);
+	a1 = Array!uint(5, 2, 3, 4, 1, 1, 5);
 	a1.sort;
 	assert(a1 == [1,1,2,3,4,5,5]);
 
 	//Add sorted
-	a1 = Array!int(1, 2, 4, 5);
+	a1 = Array!uint(1, 2, 4, 5);
 	a1.addSorted(3);
 	assert(a1 == [1,2,3,4,5]);
+
+	//Radix uint sort
+	Array!uint scratch1;
+	a1 = Array!uint(5, 2, 3, 4, 1, 1, 5);
+	a1.radixSort(scratch1);
+	assert(a1 == [1,1,2,3,4,5,5]);
+
+	//Radix float sort
+	Array!float scratch2;
+	Array!float a2 = Array!float(0.0, -0.0, 1.0, 1.1, -1.0);
+	a2.radixSort(scratch2);
+	assert(a2 == [-1.0, -0.0, 0.0, 1.0, 1.1]);
+
+	//Radix uint/float field sort
+	struct s1 { uint foo; float bar; char harhar; }
+	Array!s1 scratch3;
+	Array!s1 a3 = Array!s1(s1(60, 40.0), s1(20, 80.0), s1(40, 60.0), s1(0, 100.0));
+	
+	a3.radixSort!"a.foo"(scratch3);
+	assert(a3 == [s1(0, 100.0), s1(20, 80.0), s1(40, 60.0), s1(60, 40.0)]);
+	
+	a3.radixSort!"a.bar"(scratch3);
+	assert(a3 == [s1(60, 40.0), s1(40, 60.0), s1(20, 80.0), s1(0, 100.0)]);
 }
