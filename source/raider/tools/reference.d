@@ -28,7 +28,7 @@
  * where it counts, we make our games smoother.
  * 
  * Not compatible with any system that mishandles structs.
- * I.e. built-in associative arrays. Use tool.map.
+ * I.e. built-in associative arrays, struct initialisers..
  */
 
 module raider.tools.reference;
@@ -105,7 +105,6 @@ version(unittest)
 		struct S1 { void* ptr; } static assert(hasGarbage!S1);
 		struct S2 { int ptr; } static assert(!hasGarbage!S2);
 		struct S3 { R!int i; } static assert(!hasGarbage!S3);
-		struct S4 { union { int i; R!int j; }} static assert(!hasGarbage!S4);
 		class C1 { void* ptr; } static assert(hasGarbage!C1);
 		class C2 { int ptr; } static assert(!hasGarbage!C2);
 		class C3 { R!int i; } static assert(!hasGarbage!C3);
@@ -160,7 +159,7 @@ private struct Header(string C = "")
 public R!T New(T, Args...)(auto ref Args args)
 	if(is(T == class) || is(T == struct) || isScalarType!T)
 {
-	//HACK Detect, for example, if T is abstract.
+	//HACK Detect if T is abstract (among other things)
 	//For some reason, emplace doesn't.
 	if(false) static if(is(T == class)) T t = new T(args);
 
@@ -177,6 +176,7 @@ public R!T New(T, Args...)(auto ref Args args)
 	//Got anything the GC needs to worry about?
 	static if(hasGarbage!T)
 	{
+		//Add unpredictable delays to the application
 		GC.addRange(chunk, size);
 		scope(failure) GC.removeRange(chunk);
 	}
@@ -327,6 +327,9 @@ if(C == "R" || C == "W" || C == "P")
 
 			//Casts to a pointer, for convenience.
 			@property P!T p() { return P!T(_referent); }
+
+			//Allow to check strong refcount
+			@property ushort refcount() { return header.strongCount; }
 		}
 		//..Unless it's weak
 		else
@@ -687,6 +690,18 @@ version(unittest)
 
 			//Cannot instance abstract class.
 			static assert(!__traits(compiles, New!Animal()));
+		}
+	}
+
+	struct BlitBugTest
+	{
+		class Foo { }
+		struct Bar { R!Foo f; }
+		
+		unittest
+		{
+			R!Foo f = New!Foo();
+			//Bar b = { f }; //No copy semantics here, creates untracked reference and double-free occurs
 		}
 	}
 }

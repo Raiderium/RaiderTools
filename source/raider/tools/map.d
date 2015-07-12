@@ -6,10 +6,6 @@ import raider.tools.array;
 
 /**
  * Associative array.
- * 
- * Unlike builtin associative arrays, this does not
- * mishandle struct destruction, and cooperates with
- * tool.reference.
  */
 struct Map(K, V)
 {

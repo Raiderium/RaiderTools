@@ -6,11 +6,12 @@ import core.memory;
 import std.conv;
 import core.stdc.string : memcpy, memmove;
 import std.traits;
-import std.algorithm : swap, initializeAll, sort, binaryFun;
+import std.algorithm : swap, initializeAll, sort;
+import std.functional : binaryFun;
 import std.bitmanip;
 
 /**
- * Array stores items in contiguous memory
+ * Array stores items in contiguous memory.
  * 
  * Items must tolerate being moved without consultation.
  * 
@@ -127,7 +128,7 @@ public:
 
 	ref T opIndex(in size_t i)
 	{
-		assert(i < _size);
+		assert(i < _size, "Index out of bounds");
 		return data[i];
 	}
 
@@ -143,7 +144,8 @@ public:
 	
 	auto opSlice(size_t x, size_t y)
 	{
-		assert(y <= _size && x <= y);
+		assert(y <= _size, "Slice indices out of bounds");
+		assert(x <= y, "Slice indices out of order");
 		return data[x..y];
 	}
 	
@@ -241,15 +243,16 @@ public:
 	}
 	
 	/**
-	 * Add item to array.
+	 * Add items to the array.
 	 * 
+	 * If a single item is given, it is swapped into the array and replaced with T.init.
+	 * If an r-value is given, a copy is made.
+	 * If an array of T is given, the contents are moved, removing them from the source.
+	 * 
+	 * Maintains item order. 
 	 * If an insertion index is not specified, it defaults to _size (appending).
 	 * 
-	 * Maintains item order. Shifts the item at the specified index (if any) and all 
-	 * items after it (if any) to the right.
 	 * 
-	 * This swaps the item into the array, replacing the supplied item with T.init.
-	 * If an r-value is given, it makes a copy.
 	 */
 	void add()(auto ref T item, size_t index)
 	{
@@ -263,6 +266,11 @@ public:
 		upsize(_size, 1);
 		swap(data[_size-1], item);
 		_sorted = false;
+	}
+
+	void add()(ref Array!T array, size_t index)
+	{
+		//upsize(index, array.size);
 	}
 
 	static if(sortable)
@@ -417,7 +425,7 @@ public:
 	}
 
 	/**
-	 * Find and remove an item matching the specified item.
+	 * Find and remove an item matching the provided item.
 	 * 
 	 * Returns true on success, false if the item was not found.
 	 */
@@ -464,6 +472,7 @@ public:
 
 	/**
 	 * Sort array using 32-bit radix sort.
+	 * 
 	 * Implementation based on http://stereopsis.com/radix.html
 	 * 
 	 * This is not an in-place sort. It needs scratch space to
@@ -482,7 +491,7 @@ public:
 
 		//11-bit histograms on stack
 		immutable uint kb = 2048;
-		uint b[kb * 3];
+		uint[kb * 3] b;
 		uint* b0 = b.ptr;
 		uint* b1 = b0 + kb;
 		uint* b2 = b1 + kb;

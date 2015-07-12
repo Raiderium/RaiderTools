@@ -1,7 +1,7 @@
 {
 	"fileVersion": 1,
 	"versions": {
-		"derelict-util": "1.9.1",
+		"derelict-util": "2.0.0",
 		"derelict-physfs": "1.0.0"
 	}
 }
