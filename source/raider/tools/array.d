@@ -32,8 +32,8 @@ struct Array(T)
 		mixin(bitfields!
 		(
 			bool, "_sorted", 1, //data[x] <= data[x+1]
-			bool, "_cached", 1, //capacity cannot decrease TODO implement
-			uint, "_capacity", 6, //log2 of capacity
+			bool, "_cached", 1, //capacity cannot decrease
+			uint, "_log", 6, //log2 of capacity
 			uint, "", 24, //free parking
 		)); 
 	}
@@ -48,18 +48,20 @@ public:
 		add(item); this(list);
 	}
 
-	//Construct a copy. Invokes item copy constructor
+	//Construct a deep copy. Invokes item copy constructor
 	this(this)
 	{
 		T* that_data = data;
 		size_t that_size = size;
-		
+		bool that_sorted = _sorted;
+
 		data = null;
-		size = 0;
-		_other = 0;
-		
-		resize(that_size);
+		_size = 0;
+		_log = 0;
+
+		createRaw(0, that_size);
 		data[0.._size] = that_data[0..that_size];
+		_sorted = that_sorted;
 	}
 	
 	~this()
@@ -77,44 +79,22 @@ public:
 	enum sortable = __traits(compiles, binaryFun!"a<b"(T.init, T.init));
 
 	@property T* ptr() { return data; }
+	@property size_t capacity() { return _log ? 1 << _log : 0; }
 	@property size_t size() { return _size; }
-	alias size length;
-
-	@property size_t capacity()
-	{
-		return _capacity ? 1 << _capacity : 0;
-	}
-
-	/* Capacity allocation strategy
-	 * A dynamic array is tasked with efficiently allocating
-	 * space for a list of items that may grow and shrink
-	 * at any rate and to any size.
-	 * 
-	 * Allocating space in powers of two is a good start,
-	 * but there is still low-hanging fruit. What if the
-	 * the list is grown and pruned rapidly, or only grown 
-	 * once?
-	 * 
-	 * The first situation occurs when an array is cleared 
-	 * and refilled in each frame of a game, for instance, 
-	 * to store collision data. This is addressed by the 
-	 * 'cache' flag (not implemented yet), which stops 
-	 * capacity from decreasing.
-	 * 
-	 * The second situation /was/ addressed by the 'snuggle'
-	 * feature, which removed the allocation margin
-	 * until the next mutating method call. This now 
-	 * seems too complicated and unnecessary. Instead,
-	 * the margin might simply have a maximum size.
-	 * 
-	 * If needed in future, the snuggle feature can be 
-	 * found in the commit history of RaiderEngine.
-	 */
 	
+	/**
+	 * Set array size.
+	 * 
+	 * New items are initialised to T.init, lost items are destroyed.
+	 */
 	@property void size(size_t value)
 	{
-		resize(value);
+		if(value == _size) return;
+		if(value > _size) create(_size, value - _size);
+		else destroy(value, _size - value);
 	}
+
+	alias size length;
 
 	bool opEquals(const T[] that)
 	{
@@ -159,35 +139,76 @@ public:
 		assert(y <= _size && x <= y);
 		data[x..y] = t[];
 	}
-
-	/**
-	 * Resize the array.
-	 * 
-	 * New items are initialised to T.init, lost items are destroyed.
-	 */
-	void resize(size_t newSize)
-	{
-		if(newSize == _size) return;
-		
-		if(newSize > _size) upsize(_size, newSize - _size);
-		else downsize(newSize, _size - newSize); // *sighs*
-	}
 	
 	/**
-	 * Insert and initialise a range of items
+	 * Insert a range of T.init items
 	 * 
 	 * Index must be <= size
 	 */
-	void upsize(size_t index, size_t amount)
+	void create(size_t index, size_t amount)
 	{
+		createRaw(index, amount);
+		initRange(index, amount);
+	}
+
+	/**
+	 * Destroy a range of items
+	 */
+	void destroy(size_t index, size_t amount)
+	{
+		dtorRange(index, amount);
+		destroyRaw(index, amount);
+	}
+
+	//Set a range to T.init
+	private void initRange(size_t index, size_t amount)
+	{
+		assert(index < _size && (index + amount) <= _size);
+		if(amount == 0) return;
+
+		initializeAll(data[index..index+amount]);
+	}
+
+	//Call dtor on a range
+	private void dtorRange(size_t index, size_t amount)
+	{
+		assert(index < _size && (index + amount) <= _size);
+		if(amount == 0) return;
+
+		static if(is(T == struct))
+			foreach(ref item; data[index..index+amount])
+				typeid(T).destroy(&item);
+	}
+
+	//Call postblit on a range
+	private void postblitRange(size_t index, size_t amount)
+	{
+		assert(index < _size && (index + amount) <= _size);
+
+		static if(hasMember!(T, "__postblit"))
+		{
+			if(amount == 0) return;
+
+			static if(is(T == struct))
+				foreach(ref item; data[index..index+amount])
+					item.__postblit();
+		}
+	}
+
+	//Creates a raw range
+	private void createRaw(size_t index, size_t amount)
+	{
+		//Fun mental exercise: Walk through this function with the assumption data == null.
+		//The code fair dances on the precipice of disaster.
+
 		assert(index <= _size);
 		if(amount == 0) return;
 
-		uint temp = _capacity;
-		_capacity = 0;
-		while(capacity < (_size + amount)) _capacity = _capacity + 1;
-		
-		if(_capacity != temp)
+		uint log = _log;
+		_log = 0;
+		while(capacity < (_size + amount)) _log = _log+1;
+
+		if(_log > log || (_log < log && !_cached))
 		{
 			T* newData = cast(T*)malloc(T.sizeof * capacity);
 
@@ -202,29 +223,22 @@ public:
 			data = newData;
 		}
 		else memmove(data+index+amount, data+index, T.sizeof * (_size-index));
-		
-		initializeAll(data[index..index+amount]);
+
 		_size += amount;
 		_sorted = false;
 	}
 	
-	/**
-	 * Destroy and remove a range of items
-	 */
-	void downsize(size_t index, size_t amount)
+	//Removes a raw range
+	private void destroyRaw(size_t index, size_t amount)
 	{
 		assert(index < _size && (index + amount) <= _size);
 		if(amount == 0) return;
-		
-		static if(is(T == struct))
-			foreach(ref item; data[index..index+amount])
-				typeid(T).destroy(&item);
 
-		uint temp = _capacity;
-		_capacity = 0;
-		while(capacity < (_size - amount)) _capacity = _capacity + 1;
+		uint log = _log;
+		_log = 0;
+		while(capacity < (_size - amount)) _log = _log+1;
 
-		if(_capacity != temp)
+		if((_log < log && !_cached))
 		{
 			T* newData = cast(T*)malloc(T.sizeof * capacity);
 			memcpy(newData, data, T.sizeof * index);
@@ -241,110 +255,42 @@ public:
 		
 		_size -= amount;
 	}
+
+	/**
+	 * Move items to another array.
+	 */
+	void move(size_t index, size_t amount, ref Array!T that, size_t that_index)
+	{
+		assert(index < _size && (index + amount) <= _size);
+		assert(that_index <= that._size);
+		if(amount == 0) return;
+
+		that.createRaw(that_index, amount);
+		memcpy(that.data+that_index, data+index, T.sizeof * amount);
+		destroyRaw(index, amount);
+	}
 	
 	/**
-	 * Add items to the array.
+	 * Add an item to the array.
 	 * 
-	 * If a single item is given, it is swapped into the array and replaced with T.init.
+	 * The item is swapped into the array and replaced with T.init.
 	 * If an r-value is given, a copy is made.
-	 * If an array of T is given, the contents are moved, removing them from the source.
 	 * 
 	 * Maintains item order. 
 	 * If an insertion index is not specified, it defaults to _size (appending).
-	 * 
-	 * 
 	 */
 	void add()(auto ref T item, size_t index)
 	{
-		upsize(index, 1);
+		create(index, 1);
 		swap(data[index], item);
 		_sorted = false;
 	}
 
 	void add()(auto ref T item)
 	{
-		upsize(_size, 1);
+		create(_size, 1);
 		swap(data[_size-1], item);
 		_sorted = false;
-	}
-
-	void add()(ref Array!T array, size_t index)
-	{
-		//upsize(index, array.size);
-	}
-
-	static if(sortable)
-	{
-		/**
-		 * Sorts the array.
-		 * 
-		 * Sorting algorithm is Introsort (std.algorithm.sort with SwapStrategy.unstable)
-		 * It is unstable and does not allocate.
-		 */
-		void sort()
-		{
-			std.algorithm.sort!("a < b", std.algorithm.SwapStrategy.unstable)(data[0.._size]);
-			_sorted = true;
-		}
-
-		@property bool sorted()
-		{
-			return _sorted;
-		}
-
-		/**
-		 * Insert item in sorted order.
-		 * 
-		 * This sorts the array if it is not already sorted, 
-		 * and uses binary search to find the insert index.
-		 * 
-		 * This swaps the item into the array, replacing the supplied item with T.init.
-		 */
-		void addSorted()(auto ref T item)
-		{
-			if(_sorted && _size)
-			{
-				import core.bitop : bsr; //bit scan reverse, finds number of leading 0's 
-				
-				//b = highest set bit of _size-1
-				size_t b = (_size == 1) ? 0 : 1 << ((size_t.sizeof << 3 - 1) - bsr(_size-1));
-				size_t i = 0;
-				
-				//Count down bits from highest to lowest
-				for(; b; b >>= 1)
-				{
-					//Set bits in i (increasing it) while data[i] <= item.
-					//Skip bits that push i beyond the array size.
-					size_t j = i|b;
-					if(_size <= j) continue; 
-					if(data[j] <= item) i = j; 
-					else
-					{
-						//If data[i] becomes greater than item, remove the bounds check, it's pointless now.
-						//Set bits while data[i] <= item. 
-						//Skip bits that make data[i] larger than item.
-						b >>= 1;
-						for(; b; b >>= 1) if(data[i|b] <= item) i |= b;
-						break;
-					}
-					b >>= 1;
-				}
-				//i now contains the index of the last item that is <= item.
-				//(Or 0 if item is less than everything.)
-				if(i) add(item, i+1); //insert the item after it.
-				else
-				{
-					if(item < data[0]) add(item, 0);
-					else add(item, 1);
-				}
-				_sorted = true;
-			}
-			else
-			{
-				add(item, _size);
-				sort;
-			}
-		}
 	}
 	
 	/**
@@ -354,10 +300,23 @@ public:
 	{
 		assert(index < _size);
 		
-		T item;
+		T item = void;
 		swap(item, data[index]);
-		downsize(index, 1);
+		destroyRaw(index, 1);
 		return item;
+	}
+
+	/**
+	 * Remove a range of items and return them.
+	 */
+	Array!T remove(size_t index, size_t amount)
+	{
+		assert(index < _size && (index + amount) <= _size);
+		if(amount == 0) return Array!T();
+
+		Array!T array;
+		move(index, amount, array, 0);
+		return array;
 	}
 	
 	/**
@@ -366,10 +325,10 @@ public:
 	T pop()
 	{
 		assert(_size);
-		
-		T item;
+
+		T item = void;
 		swap(item, data[_size-1]);
-		downsize(_size-1, 1);
+		destroyRaw(_size-1, 1);
 		return item;
 	}
 	
@@ -380,14 +339,14 @@ public:
 	{
 		assert(index < _size);
 		
-		T item;
+		T item = void;
 		swap(item, data[index]);
 		if(index != _size-1)
 		{
 			swap(data[_size-1], data[index]);
 			_sorted = false;
 		}
-		downsize(_size-1, 1);
+		destroyRaw(_size-1, 1);
 		return item;
 	}
 
@@ -452,7 +411,7 @@ public:
 	///Remove all items.
 	void clear()
 	{
-		resize(0);
+		size = 0;
 	}
 	
 	@property bool empty() { return _size == 0; }
@@ -468,6 +427,80 @@ public:
 		}
 		result ~= "]";
 		return result;
+	}
+
+	static if(sortable)
+	{
+		/**
+		 * Sorts the array.
+		 * 
+		 * Sorting algorithm is Introsort (std.algorithm.sort with SwapStrategy.unstable)
+		 * It is unstable and does not allocate.
+		 */
+		void sort()
+		{
+			std.algorithm.sort!("a < b", std.algorithm.SwapStrategy.unstable)(data[0.._size]);
+			_sorted = true;
+		}
+		
+		@property bool sorted()
+		{
+			return _sorted;
+		}
+		
+		/**
+		 * Insert item in sorted order.
+		 * 
+		 * This sorts the array if it is not already sorted, 
+		 * and uses binary search to find the insert index.
+		 * 
+		 * This swaps the item into the array, replacing the supplied item with T.init.
+		 */
+		void addSorted()(auto ref T item)
+		{
+			if(_sorted && _size)
+			{
+				import core.bitop : bsr; //bit scan reverse, finds number of leading 0's 
+				
+				//b = highest set bit of _size-1
+				size_t b = (_size == 1) ? 0 : 1 << ((size_t.sizeof << 3 - 1) - bsr(_size-1));
+				size_t i = 0;
+				
+				//Count down bits from highest to lowest
+				for(; b; b >>= 1)
+				{
+					//Set bits in i (increasing it) while data[i] <= item.
+					//Skip bits that push i beyond the array size.
+					size_t j = i|b;
+					if(_size <= j) continue; 
+					if(data[j] <= item) i = j; 
+					else
+					{
+						//If data[i] becomes greater than item, remove the bounds check, it's pointless now.
+						//Set bits while data[i] <= item. 
+						//Skip bits that make data[i] larger than item.
+						b >>= 1;
+						for(; b; b >>= 1) if(data[i|b] <= item) i |= b;
+						break;
+					}
+					b >>= 1;
+				}
+				//i now contains the index of the last item that is <= item.
+				//(Or 0 if item is less than everything.)
+				if(i) add(item, i+1); //insert the item after it.
+				else
+				{
+					if(item < data[0]) add(item, 0);
+					else add(item, 1);
+				}
+				_sorted = true;
+			}
+			else
+			{
+				add(item, _size);
+				sort;
+			}
+		}
 	}
 
 	/**
@@ -487,7 +520,7 @@ public:
 	 */
 	void radixSort(alias field = "a")(ref Array!T scratch)
 	{
-		scratch.resize(_size); //no-op on repeat invocations
+		scratch.size = _size; //no-op on repeat invocations
 
 		//11-bit histograms on stack
 		immutable uint kb = 2048;
@@ -577,14 +610,14 @@ unittest
 	assert(a1.length == 1);
 
 	//Resize
-	a1.resize(100);
+	a1.size = 100;
 	assert(a1.size == 100);
 
 	//Capacity
 	assert(a1.capacity == 128);
-	a1.resize(20);
+	a1.size = 20;
 	assert(a1.capacity == 32);
-	a1.resize(32);
+	a1.size = 32;
 	assert(a1.capacity == 32);
 
 	//Contains
@@ -627,7 +660,7 @@ unittest
 	assert(a2 == [-1.0, -0.0, 0.0, 1.0, 1.1]);
 
 	//Radix uint/float field sort
-	struct s1 { uint foo; float bar; char harhar; }
+	struct s1 { uint foo; float bar; char harhar; this(this) { } }
 	Array!s1 scratch3;
 	Array!s1 a3 = Array!s1(s1(60, 40.0), s1(20, 80.0), s1(40, 60.0), s1(0, 100.0));
 	
