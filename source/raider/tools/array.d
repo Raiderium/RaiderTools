@@ -60,7 +60,8 @@ public:
 		_log = 0;
 
 		createRaw(0, that_size);
-		data[0.._size] = that_data[0..that_size];
+		memcpy(data, that_data, T.sizeof * that_size);
+		postblitRange(0, that_size);
 		_sorted = that_sorted;
 	}
 	
@@ -95,6 +96,9 @@ public:
 	}
 
 	alias size length;
+
+	@property bool cached() { return _cached; }
+	@property void cached(bool value) { _cached = value; }
 
 	bool opEquals(const T[] that)
 	{
@@ -163,7 +167,7 @@ public:
 	//Set a range to T.init
 	private void initRange(size_t index, size_t amount)
 	{
-		assert(index < _size && (index + amount) <= _size);
+		assert(index + amount <= _size);
 		if(amount == 0) return;
 
 		initializeAll(data[index..index+amount]);
@@ -172,7 +176,7 @@ public:
 	//Call dtor on a range
 	private void dtorRange(size_t index, size_t amount)
 	{
-		assert(index < _size && (index + amount) <= _size);
+		assert(index + amount <= _size);
 		if(amount == 0) return;
 
 		static if(is(T == struct))
@@ -183,12 +187,11 @@ public:
 	//Call postblit on a range
 	private void postblitRange(size_t index, size_t amount)
 	{
-		assert(index < _size && (index + amount) <= _size);
+		assert(index + amount <= _size);
+		if(amount == 0) return;
 
 		static if(hasMember!(T, "__postblit"))
 		{
-			if(amount == 0) return;
-
 			static if(is(T == struct))
 				foreach(ref item; data[index..index+amount])
 					item.__postblit();
@@ -198,18 +201,18 @@ public:
 	//Creates a raw range
 	private void createRaw(size_t index, size_t amount)
 	{
-		//Fun mental exercise: Walk through this function with the assumption data == null.
-		//The code fair dances on the precipice of disaster.
-
 		assert(index <= _size);
 		if(amount == 0) return;
 
-		uint log = _log;
-		_log = 0;
-		while(capacity < (_size + amount)) _log = _log+1;
+		//Fun mental exercise: Walk through this function with the assumption data == null.
+		//The code fair dances on the precipice of disaster.
 
-		if(_log > log || (_log < log && !_cached))
+		uint log = 0;
+		while((log ? 1 << log : 0) < (_size + amount)) log = log+1;
+
+		if(log > _log || (log < _log && !_cached))
 		{
+			_log = log;
 			T* newData = cast(T*)malloc(T.sizeof * capacity);
 
 			memcpy(newData, data, T.sizeof * index);
@@ -231,15 +234,15 @@ public:
 	//Removes a raw range
 	private void destroyRaw(size_t index, size_t amount)
 	{
-		assert(index < _size && (index + amount) <= _size);
+		assert(index + amount <= _size);
 		if(amount == 0) return;
 
-		uint log = _log;
-		_log = 0;
-		while(capacity < (_size - amount)) _log = _log+1;
+		uint log = 0;
+		while((log ? 1 << log : 0) < (_size - amount)) log = log+1;
 
-		if((_log < log && !_cached))
+		if((log < _log && !_cached))
 		{
+			_log = log;
 			T* newData = cast(T*)malloc(T.sizeof * capacity);
 			memcpy(newData, data, T.sizeof * index);
 			memcpy(newData+index, data+index+amount, T.sizeof * (_size-(index+amount)));
@@ -261,13 +264,21 @@ public:
 	 */
 	void move(size_t index, size_t amount, ref Array!T that, size_t that_index)
 	{
-		assert(index < _size && (index + amount) <= _size);
+		assert(index + amount <= _size);
 		assert(that_index <= that._size);
 		if(amount == 0) return;
 
 		that.createRaw(that_index, amount);
 		memcpy(that.data+that_index, data+index, T.sizeof * amount);
 		destroyRaw(index, amount);
+	}
+
+	/**
+	 * Move all items to the end of another array.
+	 */
+	void move(ref Array!T that)
+	{
+		move(0, _size, that, that._size);
 	}
 	
 	/**
@@ -292,7 +303,32 @@ public:
 		swap(data[_size-1], item);
 		_sorted = false;
 	}
-	
+
+	/**
+	 * Atomically add an item to the array.
+	 * 
+	 * If capacity is available, this appends the item
+	 * without blocking in a thread-safe manner. If not,
+	 * it returns false.
+	 * 
+	 * The item is swapped into the array and replaced with T.init.
+	 * If an r-value is given, a copy is made.
+	 */
+	bool atomicAdd()(auto ref T item)
+	{
+
+		import core.atomic : atomicOp;
+		auto slot = atomicOp!"+="(*cast(shared)&_size, 1);
+		if(slot <= capacity)
+		{
+			swap(data[_size-1], item);
+			return true;
+		}
+
+		atomicOp!"-="(*cast(shared)&_size, 1);
+		return false;
+	}
+
 	/**
 	 * Remove the item at the specified index and return it.
 	 */
@@ -311,7 +347,7 @@ public:
 	 */
 	Array!T remove(size_t index, size_t amount)
 	{
-		assert(index < _size && (index + amount) <= _size);
+		assert(index + amount <= _size);
 		if(amount == 0) return Array!T();
 
 		Array!T array;
@@ -652,6 +688,33 @@ unittest
 	a1 = Array!uint(5, 2, 3, 4, 1, 1, 5);
 	a1.radixSort(scratch1);
 	assert(a1 == [1,1,2,3,4,5,5]);
+
+	//Capacity caching
+	a1.size = 30;
+	a1.cached = true;
+	a1.size = 0;
+	assert(a1.capacity == 32);
+	a1.size = 5;
+	assert(a1.capacity == 32);
+	a1.cached = false;
+	a1.size = 6;
+	assert(a1.capacity == 8);
+
+	//Move
+	auto b1 = Array!uint(1,2,3,4);
+	a1 = Array!uint(0, 5);
+	b1.move(0, 4, a1, 1);
+	assert(a1 == [0,1,2,3,4,5]);
+	assert(b1 == []);
+	a1.move(0, 2, b1, 0);
+	assert(a1 == [2,3,4,5]);
+	assert(b1 == [0,1]);
+	a1.move(3, 1, b1, 2);
+	assert(a1 == [2,3,4]);
+	assert(b1 == [0,1,5]);
+	a1.move(b1);
+	assert(b1 == [0,1,5,2,3,4]);
+
 
 	//Radix float sort
 	Array!float scratch2;
