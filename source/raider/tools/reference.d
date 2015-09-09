@@ -4,31 +4,41 @@
  * Provides garbage collection based on reference
  * counting instead of scanning. This gives a tight 
  * object lifespan with guaranteed destruction and
- * no processing bursts. Uses malloc and free from 
- * the C standard library and is thread-safe.
+ * (in practice) smaller processing bursts.
  * 
  * This is better for games because D currently has a
  * stop-the-world scanning collector. The work bunches 
  * up into frame-shattering chunks, causing the game
- * to pause intermittently. The overhead of incrementing 
- * and decrementing reference counts is so tolerable 
- * in this situation it's embarassing.
+ * to either pause intermittently or lose considerable
+ * time to running the collector once per frame for
+ * predictable performance. The drawbacks of reference
+ * counting are so tolerable in this situation it's 
+ * embarassing.
+ * 
+ * Uses malloc and free from the C standard library.
+ * Thread safe and lockless.
+ * Supports weak and raw pointers.
+ * Statically prohibits strong reference cycles.
+ * Does not support interior pointers.
  * 
  * The GC is made aware of RC memory if it contains 
  * indirections - that is, pointers, references, arrays 
  * or delegates that might lead to GC memory. To avoid 
  * being scanned, don't store things the GC cares about,
  * that is, anything detected by std.traits.hasIndirections.
- * This does not include RC references themselves, which
- * are ignored via some reflective cruft.
+ * This does not include RC references themselves, which 
+ * are ignored via some reflective cruft. (Also ignored:
+ * raider.tools.array. Possibly more in future.)
  * 
  * Just to be clear, GC use is minimised, not prohibited.
  * Sometimes it is valuable or inevitable, particularly
- * with exception handling. But, by using determinism 
- * where it counts, we make our games smoother.
+ * with exception handling. But, by using reference counts
+ * where they, ah, count, we make our games smoother.
  * 
- * Not compatible with any system that mishandles structs.
- * I.e. built-in associative arrays, struct initialisers..
+ * Not compatible with any system that neglects to handle
+ * struct (de)construction and copying correctly. At time 
+ * of writing that includes builtin associative arrays and
+ * struct initialisers.
  */
 
 module raider.tools.reference;
@@ -40,16 +50,28 @@ import core.atomic;
 import core.exception : onOutOfMemoryError;
 import core.memory : GC;
 import core.stdc.stdlib : malloc, free;
-
 import raider.tools.array;
 
-//Evaluates true if a type T has GC-scannable fields.
+//Evaluates true if a type T has collectable fields.
 template hasGarbage(T)
 {
+	//Get crufty
+	static if(isInstanceOf!(R, T) || 
+		isInstanceOf!(W, T) ||
+		isInstanceOf!(P, T) ||
+		isInstanceOf!(Array, T))
+		enum hasGarbage = false;
+	else
+		enum hasGarbage = Impl!(FieldTypeTuple!T);
+		
 	template Impl(T...)
 	{
+		/* T is a tuple of types. Impl recurses through 
+		 * them by processing T[0] then either terminating 
+		 * or passing the remaining types to Impl again. */
 		static if (!T.length)
 			enum Impl = false;
+		//Stay crufty
 		else static if(isInstanceOf!(R, T[0]) || 
 		               isInstanceOf!(W, T[0]) ||
 		               isInstanceOf!(P, T[0]) ||
@@ -59,43 +81,7 @@ template hasGarbage(T)
 			enum Impl = Impl!(FieldTypeTuple!(T[0]), T[1 .. $]);
 		else
 			enum Impl = hasIndirections!(T[0]) || Impl!(T[1 .. $]);
-
-		/*FIXME Allow weak references to break cycles.
-		 * 
-		 * Reference template evaluation fails when
-		 * references form a cycle. T.tupleof fails 
-		 * because T is a forward reference.
-		 * 
-		 * Presumably a recursion issue; how can it
-		 * know the structure of T until evaluating
-		 * R!T; how can it finish evaluating R!T until
-		 * it knows the structure of T, etc.
-		 * 
-		 * Oddly enough, T.tupleof only fails in 
-		 * ~this() and static scope; it works fine 
-		 * in this() and other methods.
-		 * 
-		 * Electing to ignore until the manure hits 
-		 * the windmill and a class absolutely must
-		 * have a non-pointer reference to its kin.
-		 * The solution is to change the weak
-		 * reference strategy from zombies to a list 
-		 * of weak references, or a zombie monitor.
-		 * 
-		 * Serendipitously, the evaluation failure
-		 * can be used to detect reference cycles
-		 * at compile time, though it generates
-		 * some annoying false positives.
-		 */
 	}
-
-	static if(isInstanceOf!(R, T) || 
-	          isInstanceOf!(W, T) ||
-	          isInstanceOf!(P, T) ||
-	          isInstanceOf!(Array, T))
-		enum hasGarbage = false;
-	else
-		enum hasGarbage = Impl!(FieldTypeTuple!T);
 }
 
 version(unittest)
@@ -109,7 +95,7 @@ version(unittest)
 		class C2 { int ptr; } static assert(!hasGarbage!C2);
 		class C3 { R!int i; } static assert(!hasGarbage!C3);
 		class C4 { R!(R!int) ii; } static assert(!hasGarbage!C4);
-		//class C5 { W!C5 i; } //See to-do in hasGarbage.
+		class C5 { W!C5 i; } static assert(!hasGarbage!C5);
 		class C7 { P!C7 i; } static assert(!hasGarbage!C7);
 		static assert(!hasGarbage!(R!int));
 		//static assert(!hasGarbage!(R!(void*))); TODO Pointer boxing?
@@ -117,11 +103,10 @@ version(unittest)
 	}
 }
 
-//EnCAPsulation allows to use structs as if they were classes.
+//Encapsulation allows to use structs as if they were classes.
 private template Cap(T)
 {
-	static if(is(T == class) || is(T == interface))
-		alias T Cap;
+	static if(is(T == class) || is(T == interface)) alias T Cap;
 	else static if(is(T == struct) || isScalarType!T)
 	{
 		class Cap
@@ -135,20 +120,12 @@ private template Cap(T)
 	else static assert(0, T.stringof~" can't be boxed");
 }
 
-private struct Header(string C = "")
+private struct Header
 {
-	ushort strongCount = 1;
-	ushort weakCount = 0;
-	version(assert)
-	{
-		ushort pointerCount = 0;
-		ushort padding; //make CAS happy (needs 8, 16, 32 or 64 bits)
-	}
-
-	//Convenience alias to a reference's count.
-	static if(C == "R") alias strongCount count;
-	static if(C == "W") alias weakCount count;
-	static if(C == "P") version(assert) alias pointerCount count;
+	uint strongCount = 1;
+	uint weakCount = 1; // +1 while strongCount != 0
+	version(assert) uint pointerCount = 0;
+	bool registeredWithGC = false;
 }
 
 /**
@@ -159,30 +136,31 @@ private struct Header(string C = "")
 public R!T New(T, Args...)(auto ref Args args)
 	if(is(T == class) || is(T == struct) || isScalarType!T)
 {
-	//HACK Detect if T is abstract (among other things)
-	//For some reason, emplace doesn't.
+	//Get upset if a class can't be instantiated
 	if(false) static if(is(T == class)) T t = new T(args);
 
-	enum size = __traits(classInstanceSize, Cap!T);
-	
 	//Allocate space for the header + object
-	void* m = malloc(Header!().sizeof + size);
+	enum size = __traits(classInstanceSize, Cap!T);
+	void* m = malloc(Header.sizeof + size);
 	if(!m) onOutOfMemoryError;
 	scope(failure) core.stdc.stdlib.free(m);
 
-	Header!()* header = cast(Header!()*)m;
-	void* chunk = m + Header!().sizeof;
+	//Obtain pointers to header and memory chunk
+	Header* header = cast(Header*)m;
+	void* chunk = m + Header.sizeof;
+
+	//Init header
+	*header = Header.init;
+
+	//TODO Investigate any alignment issues that might affect performance.
 	
 	//Got anything the GC needs to worry about?
 	static if(hasGarbage!T)
 	{
-		//Add unpredictable delays to the application
 		GC.addRange(chunk, size);
+		header.registeredWithGC = true;
 		scope(failure) GC.removeRange(chunk);
 	}
-	
-	//Init header
-	*header = Header!().init;
 
 	//Construct with emplace
 	R!T result;
@@ -193,6 +171,9 @@ public R!T New(T, Args...)(auto ref Args args)
 /**
  * Allocates and default constructs a reference counted object by class name.
  * 
+ * Warning: Currently doesn't default construct.
+ * Useless except for classes without complex construction.
+ * 
  * This method is adapted from object.factory.
  */
 public R!Object New(in char[] classname)
@@ -201,27 +182,28 @@ public R!Object New(in char[] classname)
 
 	const ClassInfo ci = ClassInfo.find(classname);
 
+	//Get upset if a class can't be instantiated
 	if(!ci) { return result; }
-
 	if(ci.m_flags & 8 && !ci.defaultConstructor) return result;
 	if(ci.m_flags & 64) return result; // abstract
 
-	size_t size = ci.init.length;
-
 	//Allocate space for the header + object
-	void* m = malloc(Header!().sizeof + size);
+	size_t size = ci.init.length;
+	void* m = malloc(Header.sizeof + size);
 	if(!m) onOutOfMemoryError;
 	scope(failure) core.stdc.stdlib.free(m);
 
-	Header!()* header = cast(Header!()*)m;
-	void* chunk = m + Header!().sizeof;
+	//Obtain pointers to header and memory chunk
+	Header* header = cast(Header*)m;
+	void* chunk = m + Header.sizeof;
+
+	//Init header
+	*header = Header.init;
 
 	//Assume the GC is interested
 	GC.addRange(chunk, size);
+	header.registeredWithGC = true;
 	scope(failure) GC.removeRange(chunk);
-	
-	//Init header
-	*header = Header!().init;
 
 	//Init object
 	(cast(byte*)chunk)[0 .. size] = ci.init[];
@@ -229,9 +211,12 @@ public R!Object New(in char[] classname)
 	//Default-construct (if it has one)
 	if(ci.m_flags & 8 && ci.defaultConstructor)
 	{
-		//This fails for some reason. Source says defaultConstructor is void function(Object)..
-		//static assert(is(typeof(ci.defaultConstructor) == void function(Object)));
+		//This fails for some reason.
 		//ci.defaultConstructor(cast(Object)chunk);
+
+		//Source says defaultConstructor is void function(Object)..
+		//static assert(is(typeof(ci.defaultConstructor) == void function(Object)));
+		//static assert(__traits(compiles, cast(Object)chunk));
 	}
 
 	result._void = chunk;
@@ -242,8 +227,7 @@ public R!Object New(in char[] classname)
  * A strong reference.
  * 
  * When there are no more strong references to an object
- * it is immediately deconstructed. This guarantee is 
- * what makes reference counting actually useful.
+ * it is immediately deconstructed.
  *
  * This struct implements incref/decref semantics. The 
  * reference is aliased so the struct can be used as if 
@@ -257,20 +241,15 @@ public alias Reference!"R" R;
  * Weak references do not keep objects alive and
  * so help describe ownership. They also break
  * reference cycles that lead to memory leaks.
- * (..Except they don't, yet.)
+ * (Unfortunately they don't break compilation
+ * reference cycles, so their use is somewhat
+ * limited at the moment.)
  * 
  * Weak references are like pointers, except they 
- * do not need to be nullified manually, they can 
- * promote to a strong reference, and they can 
- * check if the referent is alive.
- * 
- * That said, don't use a weak reference if a
- * pointer reference will do. They impose a 
- * performance penalty.
- * 
- * When you use a weak reference, it is promoted
- * automatically on each access. Better to assign 
- * it to a strong reference, then access that.
+ * can check if the referent is alive and promote
+ * safely if so, and can't dereference directly.
+ * In fact, weak references aren't much like
+ * pointers at all. I lied.
  */
 public alias Reference!"W" W;
 
@@ -278,15 +257,27 @@ public alias Reference!"W" W;
  * A pointer reference.
  * 
  * Pointer references are like weak references, but
- * they cannot check validity, and must not be accessed
- * unless validity is assured by the programmer.
+ * they cannot check the referent is alive, and can
+ * only be accessed if the programmer ensures it is.
+ * In fact, they're really just raw pointers with a
+ * bit of optional debugging. Not especially similar
+ * to weak references. Sorry.
+ * 
+ * They (and raw pointers) assume the strength of the 
+ * strongest reference you can guarantee exists at a 
+ * given moment. If a strong reference exists, access
+ * them directly. If a weak reference exists, promote
+ * them by constructing a strong reference (make sure
+ * to check the promotion succeeded and the reference
+ * !is null). If you're not sure any references exist
+ * then throw that pointer away, friend, 'cause it
+ * sure as shootin' ain't pointin' at nothin'.
 
  * An assert will raise if pointer refs remain when the 
  * last strong reference expires. Make sure to nullify 
  * all pointer refs before the object is destroyed. In 
  * release mode, the assert is removed, and pointer refs 
- * become as efficient as their namesake, reducing the 
- * garbage collection footprint.
+ * become as efficient as their namesake. Hopefully.
  */
 public alias Reference!"P" P;
 
@@ -297,8 +288,6 @@ public template isReference(T)
 		isInstanceOf!(P, T);
 }
 
-//This is a template that returns a template
-//I can honestly say it is necessary and useful
 private template Reference(string C)
 if(C == "R" || C == "W" || C == "P")
 {
@@ -307,49 +296,45 @@ if(C == "R" || C == "W" || C == "P")
 	{ private:
 		alias Cap!T B;
 
-		//Referent
+		//Referent and void union (abandon hope, Java developers)
 		union { public B _referent = null; void* _void; }
 
-		//Header
-		ref shared(Header!C) header()
-		{ return *((cast(shared(Header!C)*)_void) - 1); }
+		//Header hides before _void
+		ref shared(Header) header()
+		{ return *((cast(shared(Header)*)_void) - 1); }
 
 	public:
 
-		//Make the reference behave like the referent
+		//Make the reference behave loosely like the referent
 		static if(C != "W")
 		{
 			alias _referent this;
-			auto opIndex(A...)(A args)
-			{
-				return _referent[args];
-			}
-
-			//Casts to a pointer, for convenience.
-			@property P!T p() { return P!T(_referent); }
-
-			//Allow to check strong refcount
-			@property ushort refcount() { return header.strongCount; }
+			auto opIndex(A...)(A args) { return _referent[args]; }
 		}
-		//..Unless it's weak
-		else
-			@property R!T strengthen() { return R!T(_referent); }
+
+		//Concise casting between reference types.
+		//Templated to instantiate at call site to avoid cyclic template evaluation failure.
+		@property R!T r()() { return R!T(_referent); }
+		@property W!T w()() { return W!T(_referent); }
+		@property P!T p()() { return P!T(_referent); }
+
+		//Read-access to reference counts
+		@property uint rc() { return header.strongCount; }
+		@property uint wc() { return header.weakCount - (header.strongCount != 0); }
+		version(assert) @property uint pc() { return header.pointerCount; }
 
 		//When assert is off, pointer references do not incref or decref.
 		version(assert) { enum hasRefSem = true; }
 		else { enum hasRefSem = (C != "P"); }
 
-
-		//Incref/decref semantics
+		//ctor, copy, dtor semantics
 		static if(hasRefSem)
 		{
+			this(B that) { _referent = that; _incref; }
 			this(this) { _incref; }
 			~this() { _decref;  }
 		}
-
-		//Construct weak and pointer refs from a raw ref
-		static if(C != "R")
-		this(B that) { _referent = that; static if(hasRefSem) { _incref; } }
+		else this(B that) { _referent = that; }
 
 		//Assign null
 		void opAssign(typeof(null) wut)
@@ -360,10 +345,9 @@ if(C == "R" || C == "W" || C == "P")
 
 		void opAssign(D, A:T)(D!A rhs) if(isInstanceOf(D, Reference))
 		{
-			//Assign a reference of the same type
-			static if(is(D == Reference!C))
-				swap(_referent, rhs.referent);
-			//Assign a reference of a different type
+			//Assign a reference of the same strength
+			static if(is(D == Reference!C)) swap(_referent, rhs.referent);
+			//Assign a reference of a different strength
 			else
 			{
 				alias Reference!C RefC; //for some reason D dislikes Reference!C!A
@@ -373,11 +357,10 @@ if(C == "R" || C == "W" || C == "P")
 
 		A opCast(A)() const
 		{
-			static if(isReference!A)
-				return A(cast(A.B)_referent);
+			static if(isReference!A) return A(cast(A.B)_referent);
 			else
 			{
-				static assert(C != "W", "Weak reference is not directly accessible. Use strengthen property.");
+				static assert(C != "W", "Weak reference cannot be cast.");
 				
 				static if(is(A == bool))
 					return _referent is null ? false : true; 
@@ -390,69 +373,88 @@ if(C == "R" || C == "W" || C == "P")
 
 	private:
 
+		/* Let us discuss lockless weak references like the scholarly gentlefolk we are
+		 * 
+		 * These are the rules:
+		 * - The object is destroyed when no strong references remain.
+		 * - The memory is freed when no strong or weak references remain.
+		 * - The object is destroyed once then freed once, in that order.
+		 * 
+		 * To avoid double-width compare-and-swap (DWCAS) operations,
+		 * and simplify the implementation, we slightly modify these rules:
+		 * - The object is destroyed when no strong references remain.
+		 * - While strong references remain, a weak reference is implied.
+		 * - The memory is freed when no weak references remain.
+		 * 
+		 * This avoids the 'when no strong or weak references remain' thing,
+		 * which requires atomicity involving two uints, and thus DWCAS. It
+		 * also guarantees the destroy-free ordering.
+		 * 
+		 * So. Here are the acquire and release operations.
+		 * 
+		 * Acquire strong:
+		 * If copying from another strong ref, just incref.
+		 * If promoting to strong from weak or raw, incref if refs remain; 
+		 * otherwise, fail to acquire. (A custom atomic increment.)
+		 * 
+		 * Acquire weak:
+		 * Just incwef. No special action to take.
+		 * 
+		 * Free strong:
+		 * Decref.
+		 * If no more refs, destroy then decwef.
+		 * If no more wefs, free memory.
+		 * 
+		 * Free weak:
+		 * Decwef. If no more wefs, free memory.
+		 * 
+		 * Yay~
+		 */
+
 		static if(hasRefSem)
 		{
-			//Incref / decref
 			void _incref()
 			{
-				if(_referent) atomicOp!"+="(header.count, 1);
+				if(_referent)
+				{
+					//Currently, all strong acquires assume a weak source.
+					//The performance hit should be minimal, but TODO profile.
+					static if(C == "R")
+					{
+						uint acquire;
+						uint get, set;
+						do
+						{
+							get = set = atomicLoad!(MemoryOrder.raw)(header.strongCount);
+							acquire = set != 0;
+							set += acquire; 
+						}
+						while(!cas(&header.strongCount, get, set));
+
+						if(!acquire) _referent = null;
+					}
+
+					static if(C == "W") atomicOp!"+="(header.weakCount, 1);
+					static if(C == "P") atomicOp!"+="(header.pointerCount, 1);
+				}
 			}
 			
 			void _decref()
 			{
-				/* Let us discuss lockless weak references
-				 * 
-				 * There are three rules:
-				 * - The object is destructed when refs reach 0.
-				 * - The memory is freed when refs and wefs reach 0.
-				 * - Must be destructed and freed once, in that order.
-				 * 
-				 * Decref:
-				 * If no more refs, dtor and set refs max.
-				 * If no more refs OR wefs, do as above, then 
-				 * decwef. If wefs max, free.
-				 * 
-				 * Decwef:
-				 * If no more wefs, and refs max,
-				 * decwef. If wefs max, free.
-				 * 
-				 * You are not expected to understand this.
-				 * Or its implementation.
-				 * I sure don't.
-				 */
 				if(_referent)
 				{
-					//CAS the whole header, we need atomicity
-					Header!C get, set;
-					
-					do {
-						get = set = atomicLoad(header);
-						set.count -= 1; }
-					while(!cas(&header(), get, set));
-
-					if(set.count == 0)
+					static if(C == "R")
 					{
-						static if(C == "R")
+						if(atomicOp!"-="(header.strongCount, 1) == 0)
 						{
 							_dtor;
-							scope(exit) //the memory must be freed, come what may
-							{
-								atomicStore(header.count, ushort.max);
-
-								//If no more wefs, decwef. If wefs max, free.
-								if(atomicLoad(header.weakCount) == 0 &&
-								   atomicOp!"-="(header.weakCount, 1) == ushort.max)
-									_free;
-							}
-						}
-						static if(C == "W")
-						{
-							//If refs max, decwef. If wefs max, free.
-							if(atomicLoad(header.strongCount) == ushort.max &&
-							   atomicOp!"-="(header.weakCount, 1) == ushort.max)
-								_free;
+							if(atomicOp!"-="(header.weakCount, 1) == 0) _free;
+							//Reminder: Exceptions thrown from destructors are errors (unrecoverable)
 						}
 					}
+
+					static if(C == "W") if(atomicOp!"-="(header.weakCount, 1) == 0) _free;
+					static if(C == "P") atomicOp!"-="(header.pointerCount, 1);
 				}
 			}
 		}
@@ -461,71 +463,32 @@ if(C == "R" || C == "W" || C == "P")
 		{
 			void _free()
 			{
-				static if(__traits(compiles, FieldTypeTuple!T))
-				{ static if(hasGarbage!T) GC.removeRange(_void); }
-				else static assert(0, "Reference cycle detected.");
-
-				core.stdc.stdlib.free(_void - Header!().sizeof);
+				if(header.registeredWithGC) GC.removeRange(_void);
+				core.stdc.stdlib.free(_void - Header.sizeof);
 			}
 		}
 
 		static if(C == "R")
 		{
-			/**
-			 * Promote to a strong reference from a raw pointer.
-			 * The pointer is trusted to point at valid header'd
-			 * memory for the duration. Intended for use with
-			 * the 'this' pointer, i.e. return R!MyClass(this).
-			 */
-			public this(B that)
-			{
-				if(that)
-				{
-					_referent = that;
-					
-					bool acquire;
-					Header!C get, set;
-
-					do {
-						acquire = true;
-						get = set = atomicLoad(header);
-
-						//If refs are 0 or max, do not acquire.
-						//(destruction in progress or complete)
-						if(set.count == ushort.max || set.count == 0)
-							acquire = false;
-						//Otherwise, incref.
-						else
-							set.count += 1;
-					}
-					while(!cas(&header(), get, set));
-
-					if(!acquire) _referent = null;
-				}
-			}
-
 			void _dtor()
 			{
-				void* o = _void;
-				
 				//alias this makes it mildly impossible to call B.~this
 				//FIXME Likely to explode if an encapsulated T uses alias this
-				static if(is(T == struct))
-				{
-					destroy(_referent._t);
-				}
-				else static if(is(T == class) || is(T == interface))
-				{
-					destroy(_referent);
-				}
+
+				//Destroy referent. Temporary variable used because destroy() assigns null.
+				void* o = _void;
+				static if(is(T == struct)) destroy(_referent._t);
+				else static if(is(T == class) || is(T == interface)) destroy(_referent);
 				//numeric types don't need destruction
-				
-				//Reestablish referent (destroy() assigns null)
 				_void = o;
 				
-				//assert(header.pointerCount == 0);
+				assert(header.pointerCount == 0);
 			}
 		}
+
+		//Detect reference cycles
+		static if(C == "R" && !__traits(compiles, FieldTypeTuple!T))
+			static assert(0, "Reference cycle detected.");
 	}
 }
 
@@ -560,7 +523,7 @@ version(unittest)
 
 	struct RTest
 	{
-		class C1 { P!C3 c3; } //Change to R!C3 to get a reference cycle error
+		class C1 { W!C3 c3; } //Change to R!C3 to get a reference cycle error
 		class C2 { R!C1 c1; }
 		class C3 { R!C2 c2; }
 	}
@@ -571,10 +534,10 @@ version(unittest)
 		{
 			R!int r = New!int();
 			P!int p = r;
-			assert(r.header.strongCount == 1);
-			assert(r.header.pointerCount == 1);
+			assert(r.rc == 1);
+			assert(r.pc == 1);
 			p = null;
-			assert(r.header.pointerCount == 0);
+			assert(r.pc == 0);
 			assert(p is null);
 			assert(p == null);
 		}
@@ -593,59 +556,59 @@ version(unittest)
 			assert(r != null);
 			assert(r !is null);
 			assert(r);
-			assert(r.header.strongCount == 1);
-			assert(r.header.weakCount == 0);
-			assert(r.header.pointerCount == 0);
+			assert(r.rc == 1);
+			assert(r.wc == 0);
+			assert(r.pc == 0);
 			
 			W!C1 w = r;
-			assert(w.strengthen == r);
-			//FIXME D fails to destruct the value returned from w.strengthen.
-			//assert(w.strengthen is r);
-			//if(w.strengthen is r) {} else assert(0);
-			assert(w.strengthen != null);
-			assert(w.strengthen !is null);
-			assert(w.strengthen);
-			assert(r.header.strongCount == 1);
-			assert(r.header.weakCount == 1);
-			assert(r.header.pointerCount == 0);
-			
-			w.strengthen.x = 1;
+			assert(w.r == r);
+			//FIXME D fails to destruct the value returned from w.r
+			//assert(w.r is r);
+			//Specifically with the 'is' syntax.. buh?
+			assert(w.r != null);
+			assert(w.r !is null);
+			assert(w.r);
+			assert(r.rc == 1);
+			assert(r.wc == 1);
+			assert(r.pc == 0);
+
+			w.r.x = 1;
 			assert(r.x == 1);
-			r.x = w.strengthen.x + w.strengthen.x;
-			assert(w.strengthen.x == 2);
-			assert(r.header.strongCount == 1);
-			assert(r.header.weakCount == 1);
-			assert(r.header.pointerCount == 0);
+			r.x = w.r.x + w.r.x;
+			assert(w.r.x == 2);
+			assert(r.rc == 1);
+			assert(r.wc == 1);
+			assert(r.pc == 0);
 			
-			R!C1 rr = w.strengthen;
+			R!C1 rr = w.r;
 			assert(rr);
 			assert(rr is r);
-			assert(r.header.strongCount == 2);
-			assert(r.header.weakCount == 1);
-			assert(r.header.pointerCount == 0);
+			assert(r.rc == 2);
+			assert(r.wc == 1);
+			assert(r.pc == 0);
 			
 			r = null;
 			assert(r == null);
 			assert(r is null);
 			assert(r._referent is null);
-			assert(w.strengthen);
-			assert(w.header.strongCount == 1);
-			assert(w.header.weakCount == 1);
-			assert(w.header.pointerCount == 0);
+			assert(w.r);
+			assert(w.rc == 1);
+			assert(w.wc == 1);
+			assert(w.pc == 0);
 			
 			rr = null;
-			assert(w.strengthen == null);
-			assert(w.strengthen is null);
-			assert(w.header.strongCount == ushort.max);
-			assert(w.header.weakCount == 1);
-			assert(w.header.pointerCount == 0);
+			assert(w.r == null);
+			assert(w.r is null);
+			assert(w.rc == 0);
+			assert(w.wc == 1); assert(w.header.weakCount == 1);
+			assert(w.pc == 0);
 			
-			r = w.strengthen;
+			r = w.r;
 			assert(r is null);
-			assert(w.header.strongCount == ushort.max);
-			assert(w.header.weakCount == 1);
-			assert(w.header.pointerCount == 0);
-			
+			assert(w.rc == 0);
+			assert(w.wc == 1);
+			assert(w.pc == 0);
+
 			w = null;
 		}
 	}
