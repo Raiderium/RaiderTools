@@ -241,9 +241,6 @@ public alias Reference!"R" R;
  * Weak references do not keep objects alive and
  * so help describe ownership. They also break
  * reference cycles that lead to memory leaks.
- * (Unfortunately they don't break compilation
- * reference cycles, so their use is somewhat
- * limited at the moment.)
  * 
  * Weak references are like pointers, except they 
  * can check if the referent is alive and promote
