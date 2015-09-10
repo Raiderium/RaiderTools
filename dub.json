@@ -9,6 +9,6 @@
     "targetPath": "lib",
 
 	"dependencies": { 
-		"derelict-physfs": ">0.0.0",
+		"derelict-physfs": ">0.0.0"
 	}
 }
