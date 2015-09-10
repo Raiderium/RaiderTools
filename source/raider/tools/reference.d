@@ -50,6 +50,7 @@ import core.atomic;
 import core.exception : onOutOfMemoryError;
 import core.memory : GC;
 import core.stdc.stdlib : malloc, free;
+import core.vararg;
 import raider.tools.array;
 
 //Evaluates true if a type T has collectable fields.
