@@ -80,16 +80,52 @@ public:
 	
 	override void writeBytes(const(ubyte)[] bytes)
 	{
-		if(PHYSFS_write(file, cast(const(void)*)bytes.ptr, bytes.length, 1) != 1)
-			throw new StreamException("Error writing to '" ~ filename ~ "'");
+    static if (uint.sizeof < typeof(bytes.length).sizeof)
+    {
+      auto offset = 0;
+      auto length = bytes.length;
+      while (length > 0)
+      {
+        uint safe_length = length % uint.max;
+        auto ptr = bytes.ptr + offset;
+        offset += safe_length;
+        length -= safe_length;
+        if(PHYSFS_write(file, cast(const(void)*)ptr, safe_length, 1U) != 1)
+          throw new StreamException("Error writing to '" ~ filename ~ "'");
+      }
+    }
+    else
+    {
+      if(PHYSFS_write(file, cast(const(void)*)bytes.ptr, bytes.length, 1U) != 1)
+        throw new StreamException("Error writing to '" ~ filename ~ "'");
+    }
 	}
 	
 	override void readBytes(ubyte[] bytes)
 	{
-		if(PHYSFS_read(file, cast(void*)bytes.ptr, bytes.length, 1) != 1)
-			throw new StreamException("Error reading from '" ~ filename ~ "'");
-		if(PHYSFS_eof(file))
-			throw new StreamException("EOF reading from '" ~ filename ~ "'");
+    static if (uint.sizeof < typeof(bytes.length).sizeof)
+    {
+      auto offset = 0;
+      auto length = bytes.length;
+      while (length > 0)
+      {
+        uint safe_length = length % uint.max;
+        auto ptr = bytes.ptr + offset;
+        offset += safe_length;
+        length -= safe_length;
+        if(PHYSFS_read(file, cast(void*)ptr, safe_length, 1U) != 1U)
+          throw new StreamException("Error reading from '" ~ filename ~ "'");
+        if(PHYSFS_eof(file))
+          throw new StreamException("EOF reading from '" ~ filename ~ "'");
+      }
+    }
+    else
+    {
+      if(PHYSFS_read(file, cast(void*)bytes.ptr, bytes.length, 1U) != 1U)
+        throw new StreamException("Error reading from '" ~ filename ~ "'");
+      if(PHYSFS_eof(file))
+        throw new StreamException("EOF reading from '" ~ filename ~ "'");
+    }
 	}
 }
 

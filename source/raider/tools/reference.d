@@ -50,6 +50,7 @@ import core.atomic;
 import core.exception : onOutOfMemoryError;
 import core.memory : GC;
 import core.stdc.stdlib : malloc, free;
+import core.vararg;
 import raider.tools.array;
 
 //Evaluates true if a type T has collectable fields.
@@ -479,7 +480,7 @@ if(C == "R" || C == "W" || C == "P")
 				//numeric types don't need destruction
 				_void = o;
 				
-				assert(header.pointerCount == 0);
+        version(assert) assert(header.pointerCount == 0);
 			}
 		}
 
