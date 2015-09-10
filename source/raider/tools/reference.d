@@ -206,7 +206,7 @@ public R!Object New(in char[] classname)
 	scope(failure) GC.removeRange(chunk);
 
 	//Init object
-	(cast(byte*)chunk)[0 .. size] = ci.init[];
+	chunk[0 .. size] = ci.init[];
 
 	//Default-construct (if it has one)
 	if(ci.m_flags & 8 && ci.defaultConstructor)
