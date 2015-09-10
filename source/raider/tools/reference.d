@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Reference-count garbage collection
  * 
  * Provides garbage collection based on reference
