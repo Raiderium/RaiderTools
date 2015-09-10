@@ -1,4 +1,4 @@
-﻿module raider.tools.map;
+module raider.tools.map;
 
 import std.algorithm : swap, cmp;
 import std.exception;
