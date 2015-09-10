@@ -480,7 +480,7 @@ if(C == "R" || C == "W" || C == "P")
 				//numeric types don't need destruction
 				_void = o;
 				
-				assert(header.pointerCount == 0);
+        version(assert) assert(header.pointerCount == 0);
 			}
 		}
 
