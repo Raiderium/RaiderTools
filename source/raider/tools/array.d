@@ -22,7 +22,7 @@ import std.bitmanip;
  * Item order is maintained during mutations unless otherwise noted.
  */
 struct Array(T)
-{private:
+{package:
 	T* data = null;
 	size_t _size = 0; //Number of items stored
 
@@ -31,10 +31,9 @@ struct Array(T)
 		uint _other = 0;
 		mixin(bitfields!
 		(
-			bool, "_sorted", 1, //data[x] <= data[x+1]
 			bool, "_cached", 1, //capacity cannot decrease
 			uint, "_log", 6, //log2 of capacity
-			uint, "", 24, //free parking
+			uint, "", 25, //free parking
 		)); 
 	}
 
@@ -53,7 +52,6 @@ public:
 	{
 		T* that_data = data;
 		size_t that_size = size;
-		bool that_sorted = _sorted;
 
 		data = null;
 		_size = 0;
@@ -62,7 +60,6 @@ public:
 		createRaw(0, that_size);
 		memcpy(data, that_data, T.sizeof * that_size);
 		postblitRange(0, that_size);
-		_sorted = that_sorted;
 	}
 	
 	~this()
@@ -76,8 +73,6 @@ public:
 		swap(_size, that._size);
 		swap(_other, that._other);
 	}
-
-	enum sortable = __traits(compiles, binaryFun!"a<b"(T.init, T.init));
 
 	@property T* ptr() { return data; }
 	@property size_t capacity() { return _log ? 1 << _log : 0; }
@@ -228,7 +223,6 @@ public:
 		else memmove(data+index+amount, data+index, T.sizeof * (_size-index));
 
 		_size += amount;
-		_sorted = false;
 	}
 	
 	//Removes a raw range
@@ -294,39 +288,12 @@ public:
 	{
 		create(index, 1);
 		swap(data[index], item);
-		_sorted = false;
 	}
 
 	void add()(auto ref T item)
 	{
 		create(_size, 1);
 		swap(data[_size-1], item);
-		_sorted = false;
-	}
-
-	/**
-	 * Atomically add an item to the array.
-	 * 
-	 * If capacity is available, this appends the item
-	 * without blocking in a thread-safe manner. If not,
-	 * it returns false.
-	 * 
-	 * The item is swapped into the array and replaced with T.init.
-	 * If an r-value is given, a copy is made.
-	 */
-	bool atomicAdd()(auto ref T item)
-	{
-
-		import core.atomic : atomicOp;
-		auto slot = atomicOp!"+="(*cast(shared)&_size, 1);
-		if(slot <= capacity)
-		{
-			swap(data[_size-1], item);
-			return true;
-		}
-
-		atomicOp!"-="(*cast(shared)&_size, 1);
-		return false;
 	}
 
 	/**
@@ -380,54 +347,47 @@ public:
 		if(index != _size-1)
 		{
 			swap(data[_size-1], data[index]);
-			_sorted = false;
 		}
 		destroyRaw(_size-1, 1);
 		return item;
 	}
+
+	//Transform a field into an std.algorithm predicate
+	private template less(alias field)
+	{ enum less = field != "" ? "a."~field~"<b."~field : "a < b"; }
+
+	//Transform a field into a mixin-ready string
+	private template fm(alias field)
+	{ enum fm = field != "" ? "."~field : ""; }
 
 	/**
 	 * Find the index of an item.
 	 * 
 	 * Returns true if found, and puts the index in foundIndex.
 	 */
-	bool find(const T item, out size_t foundIndex)
+	bool find(alias field = "", F)(const F that, out size_t foundIndex)
 	{
-		static if(sortable)
+		foreach(x; 0.._size)
 		{
-			//TODO Binary search if  _sorted.
-			foreach(x; 0.._size)
+			if(mixin("data[x]"~fm!field~" == that"))
 			{
-				if(data[x] == item)
-				{
-					foundIndex = x;
-					return true;
-				}
-			}
-		}
-		else
-		{
-			foreach(x; 0.._size)
-			{
-				if(data[x] == item)
-				{
-					foundIndex = x;
-					return true;
-				}
+				foundIndex = x;
+				return true;
 			}
 		}
 		return false;
 	}
 
+
 	/**
-	 * Find and remove an item matching the provided item.
+	 * Find and remove an item.
 	 * 
 	 * Returns true on success, false if the item was not found.
 	 */
-	bool removeItem(const T item)
+	bool removeItem(alias field = "", F)(const F that)
 	{
 		size_t index;
-		if(find(item, index))
+		if(find!field(that, index))
 		{
 			remove(index);
 			return true;
@@ -438,10 +398,10 @@ public:
 	/**
 	 * Check if the array contains an item.
 	 */
-	bool contains(const T item)
+	bool contains(alias field = "", F)(const F dat)
 	{
-		size_t dat_index_tho;
-		return find(item, dat_index_tho);
+		size_t index_tho;
+		return find!field(dat, index_tho);
 	}
 	
 	///Remove all items.
@@ -465,78 +425,74 @@ public:
 		return result;
 	}
 
-	static if(sortable)
+	/**
+	 * Sorts the array by T or a specified field of T.
+	 * 
+	 * Sorting algorithm is Introsort (std.algorithm.sort with SwapStrategy.unstable)
+	 * It is unstable and does not allocate.
+	 */
+	void sort(alias field = "")()
 	{
-		/**
-		 * Sorts the array.
-		 * 
-		 * Sorting algorithm is Introsort (std.algorithm.sort with SwapStrategy.unstable)
-		 * It is unstable and does not allocate.
-		 */
-		void sort()
+		std.algorithm.sort!(less!field, std.algorithm.SwapStrategy.unstable)(data[0.._size]);
+	}
+
+	///Returns true if the array is sorted.
+	@property bool sorted(alias field = "")()
+	{
+		return std.algorithm.isSorted!(less!field)(data[0.._size]);
+	}
+	
+	/**
+	 * Insert item in sorted order.
+	 * 
+	 * This uses binary search to find the insert index.
+	 * The array must be in a sorted state before this
+	 * is called.
+	 * 
+	 * This swaps the item into the array, replacing 
+	 * the supplied item with T.init.
+	 */
+	void addSorted(alias field = "")(auto ref T item)
+	{
+		assert(sorted!field);
+
+		if(_size)
 		{
-			std.algorithm.sort!("a < b", std.algorithm.SwapStrategy.unstable)(data[0.._size]);
-			_sorted = true;
-		}
-		
-		@property bool sorted()
-		{
-			return _sorted;
-		}
-		
-		/**
-		 * Insert item in sorted order.
-		 * 
-		 * This sorts the array if it is not already sorted, 
-		 * and uses binary search to find the insert index.
-		 * 
-		 * This swaps the item into the array, replacing the supplied item with T.init.
-		 */
-		void addSorted()(auto ref T item)
-		{
-			if(_sorted && _size)
+			import core.bitop : bsr; //bit scan reverse, finds number of leading 0's 
+			
+			//b = highest set bit of _size-1
+			size_t b = (_size == 1) ? 0 : 1 << ((size_t.sizeof << 3 - 1) - bsr(_size-1));
+			size_t i = 0;
+			
+			//Count down bits from highest to lowest
+			for(; b; b >>= 1)
 			{
-				import core.bitop : bsr; //bit scan reverse, finds number of leading 0's 
-				
-				//b = highest set bit of _size-1
-				size_t b = (_size == 1) ? 0 : 1 << ((size_t.sizeof << 3 - 1) - bsr(_size-1));
-				size_t i = 0;
-				
-				//Count down bits from highest to lowest
-				for(; b; b >>= 1)
-				{
-					//Set bits in i (increasing it) while data[i] <= item.
-					//Skip bits that push i beyond the array size.
-					size_t j = i|b;
-					if(_size <= j) continue; 
-					if(data[j] <= item) i = j; 
-					else
-					{
-						//If data[i] becomes greater than item, remove the bounds check, it's pointless now.
-						//Set bits while data[i] <= item. 
-						//Skip bits that make data[i] larger than item.
-						b >>= 1;
-						for(; b; b >>= 1) if(data[i|b] <= item) i |= b;
-						break;
-					}
-					b >>= 1;
-				}
-				//i now contains the index of the last item that is <= item.
-				//(Or 0 if item is less than everything.)
-				if(i) add(item, i+1); //insert the item after it.
+				//Set bits in i (increasing it) while data[i] <= item.
+				//Skip bits that push i beyond the array size.
+				size_t j = i|b;
+				if(_size <= j) continue; 
+				if(mixin("data[j]"~fm!field~" <= item"~fm!field)) i = j;
 				else
 				{
-					if(item < data[0]) add(item, 0);
-					else add(item, 1);
+					//If data[i] becomes greater than item, remove the bounds check, it's pointless now.
+					//Set bits while data[i] <= item. 
+					//Skip bits that make data[i] larger than item.
+					b >>= 1;
+					for(; b; b >>= 1) if(mixin("data[i|b]"~fm!field~" <= item"~fm!field)) i |= b;
+					break;
 				}
-				_sorted = true;
+				b >>= 1;
 			}
+			//i now contains the index of the last item that is <= item.
+			//(Or 0 if item is less than everything.)
+			if(i) add(item, i+1); //insert the item after it.
 			else
 			{
-				add(item, _size);
-				sort;
+				if(mixin("item"~fm!field~" < data[0]"~fm!field)) add(item, 0);
+				else add(item, 1);
 			}
 		}
+		else add(item);
 	}
 
 	/**
@@ -554,8 +510,10 @@ public:
 	 * See unittests for usage examples. If no field is given,
 	 * it sorts on T, which must be uint or float.
 	 */
-	void radixSort(alias field = "a")(ref Array!T scratch)
+	void radixSort(alias field = "")(ref Array!T scratch)
 	{
+		enum f = field != "" ? "a."~field : "a";
+
 		scratch.size = _size; //no-op on repeat invocations
 
 		//11-bit histograms on stack
@@ -569,7 +527,7 @@ public:
 		for(int x = 0; x < _size; x++)
 		{
 			T a = data[x];
-			mixin("auto p = &(" ~ field ~ ");");
+			mixin("auto p = &(" ~ f ~ ");");
 			uint i = *cast(uint*)p;
 
 			//Assert field is uint or float
@@ -597,7 +555,7 @@ public:
 		for(int x = 0; x < _size; x++)
 		{
 			T a = data[x];
-			mixin("auto p = &(" ~ field ~ ");");
+			mixin("auto p = &(" ~ f ~ ");");
 			uint* i = cast(uint*)p;
 
 			//Flip float
@@ -611,7 +569,7 @@ public:
 		for(int x = 0; x < _size; x++)
 		{
 			T a = scratch[x];
-			mixin("uint i = *cast(uint*)&(" ~ field ~ ");");
+			mixin("uint i = *cast(uint*)&(" ~ f ~ ");");
 			uint pos = i >> 11 & 0x7FF;
 			data[++b1[pos]] = a;
 		}
@@ -620,7 +578,7 @@ public:
 		for(int x = 0; x < _size; x++)
 		{
 			T a = data[x];
-			mixin("auto p = &(" ~ field ~ ");");
+			mixin("auto p = &(" ~ f ~ ");");
 			uint* i = cast(uint*)p;
 			uint pos = *i >> 22;
 
@@ -632,7 +590,6 @@ public:
 
 		//Swap arrays so data points to sorted items
 		swap(data, scratch.data);
-		//TODO Investigate consequences of swapping _other.
 		swap(_other, scratch._other);
 	}
 }
@@ -673,14 +630,21 @@ unittest
 	//toString
 	assert(a1.toString == "[1, 3, 4, 5]");
 
+	//Sorted
+	assert(a1.sorted);
+
 	//Sort
 	a1 = Array!uint(5, 2, 3, 4, 1, 1, 5);
 	a1.sort;
 	assert(a1 == [1,1,2,3,4,5,5]);
 
 	//Add sorted
-	a1 = Array!uint(1, 2, 4, 5);
+	a1 = Array!uint();
 	a1.addSorted(3);
+	a1.addSorted(1);
+	a1.addSorted(4);
+	a1.addSorted(5);
+	a1.addSorted(2);
 	assert(a1 == [1,2,3,4,5]);
 
 	//Radix uint sort
@@ -727,9 +691,9 @@ unittest
 	Array!s1 scratch3;
 	Array!s1 a3 = Array!s1(s1(60, 40.0), s1(20, 80.0), s1(40, 60.0), s1(0, 100.0));
 	
-	a3.radixSort!"a.foo"(scratch3);
+	a3.radixSort!"foo"(scratch3);
 	assert(a3 == [s1(0, 100.0), s1(20, 80.0), s1(40, 60.0), s1(60, 40.0)]);
 	
-	a3.radixSort!"a.bar"(scratch3);
+	a3.radixSort!"bar"(scratch3);
 	assert(a3 == [s1(60, 40.0), s1(40, 60.0), s1(20, 80.0), s1(0, 100.0)]);
 }
