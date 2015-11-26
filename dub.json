@@ -7,8 +7,4 @@
     "authors": ["Aiden Sibley"],
     "targetName": "RaiderTools",
     "targetPath": "lib",
-
-	"dependencies": { 
-		"derelict-physfs": ">0.0.0"
-	}
 }
