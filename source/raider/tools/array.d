@@ -1,12 +1,13 @@
 module raider.tools.array;
 
-import raider.tools.reference : hasGarbage;
+import raider.tools.reference;
 import core.stdc.stdlib;
 import core.memory;
 import std.conv;
 import core.stdc.string : memcpy, memmove;
 import std.traits;
-import std.algorithm : swap, initializeAll, sort;
+import std.algorithm : swap, initializeAll;
+static import std.algorithm;
 import std.functional : binaryFun;
 import std.bitmanip;
 
@@ -179,6 +180,9 @@ public:
 				typeid(T).destroy(&item);
 	}
 
+	//TODO Try allocating on powers of two bytes, not powers of two item counts.
+	//Preallocation is very important!
+
 	//Call postblit on a range
 	private void postblitRange(size_t index, size_t amount)
 	{
@@ -194,7 +198,7 @@ public:
 	}
 
 	//Creates a raw range
-	private void createRaw(size_t index, size_t amount)
+	package void createRaw(size_t index, size_t amount)
 	{
 		assert(index <= _size);
 		if(amount == 0) return;
@@ -226,7 +230,7 @@ public:
 	}
 	
 	//Removes a raw range
-	private void destroyRaw(size_t index, size_t amount)
+	package void destroyRaw(size_t index, size_t amount)
 	{
 		assert(index + amount <= _size);
 		if(amount == 0) return;

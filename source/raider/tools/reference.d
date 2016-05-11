@@ -28,7 +28,7 @@
  * that is, anything detected by std.traits.hasIndirections.
  * This does not include RC references themselves, which 
  * are ignored via some reflective cruft. (Also ignored:
- * raider.tools.array. Possibly more in future.)
+ * other structures from raider.tools.)
  * 
  * Just to be clear, GC use is minimised, not prohibited.
  * Sometimes it is valuable or inevitable, particularly
@@ -49,8 +49,9 @@ import std.conv;
 import core.atomic;
 import core.exception : onOutOfMemoryError;
 import core.memory : GC;
-import core.stdc.stdlib : malloc, free;
+static import core.stdc.stdlib;
 import raider.tools.array;
+import raider.tools.bag;
 
 //Evaluates true if a type T has collectable fields.
 template hasGarbage(T)
@@ -59,7 +60,9 @@ template hasGarbage(T)
 	static if(isInstanceOf!(R, T) || 
 		isInstanceOf!(W, T) ||
 		isInstanceOf!(P, T) ||
-		isInstanceOf!(Array, T))
+		isInstanceOf!(Array, T) ||
+		isInstanceOf!(Bag, T) ||
+		isInstanceOf!(Pocket, T))
 		enum hasGarbage = false;
 	else
 		enum hasGarbage = Impl!(FieldTypeTuple!T);
@@ -75,7 +78,9 @@ template hasGarbage(T)
 		else static if(isInstanceOf!(R, T[0]) || 
 		               isInstanceOf!(W, T[0]) ||
 		               isInstanceOf!(P, T[0]) ||
-		               isInstanceOf!(Array, T[0]))
+		               isInstanceOf!(Array, T[0]) ||
+		               isInstanceOf!(Bag, T[0]) ||
+		               isInstanceOf!(Pocket, T[0]))
 			enum Impl = Impl!(T[1 .. $]);
 		else static if(is(T[0] == struct) || is(T[0] == union))
 			enum Impl = Impl!(FieldTypeTuple!(T[0]), T[1 .. $]);
@@ -141,7 +146,7 @@ public R!T New(T, Args...)(auto ref Args args)
 
 	//Allocate space for the header + object
 	enum size = __traits(classInstanceSize, Cap!T);
-	void* m = malloc(Header.sizeof + size);
+	void* m = core.stdc.stdlib.malloc(Header.sizeof + size);
 	if(!m) onOutOfMemoryError;
 	scope(failure) core.stdc.stdlib.free(m);
 
@@ -153,6 +158,7 @@ public R!T New(T, Args...)(auto ref Args args)
 	*header = Header.init;
 
 	//TODO Investigate any alignment issues that might affect performance.
+	//TODO Implement free lists..
 	
 	//Got anything the GC needs to worry about?
 	static if(hasGarbage!T)
@@ -189,7 +195,7 @@ public R!Object New(in char[] classname)
 
 	//Allocate space for the header + object
 	size_t size = ci.init.length;
-	void* m = malloc(Header.sizeof + size);
+	void* m = core.stdc.stdlib.malloc(Header.sizeof + size);
 	if(!m) onOutOfMemoryError;
 	scope(failure) core.stdc.stdlib.free(m);
 

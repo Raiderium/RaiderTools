@@ -40,14 +40,17 @@ struct Map(K, V)
 	{
 		size_t index;
 
-		Pair pair = Pair(key, value);
-
-		if(pairs.find(pair, index))
+		if(pairs.find!"key"(key, index))
 			//Overwrite existing value
 			pairs[index].value = value;
 		else
+		{
 			//Add new value
+			Pair pair;
+			pair.key = key;
+			pair.value = value;
 			pairs.addSorted(pair);
+		}
 	}
 
 	ref V opIndex(const K key)
@@ -91,7 +94,7 @@ struct Map(K, V)
 }
 
 final class MapException : Exception
-{ this(string msg) { super(msg); } }
+{ import raider.tools.exception; mixin SimpleThis; }
 
 unittest
 {
