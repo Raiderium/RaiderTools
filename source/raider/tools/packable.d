@@ -21,29 +21,44 @@
  * formats) with a processor-intensive toPack, it may implement 
  * estimatePackSize to return a non-zero value. This will eliminate 
  * the first call to toPack. The estimated value is written into 
- * the pack and also used for unpacking.
- * 
- * toPack and fromPack may throw, but must leave a valid object in
- * their wake. They may catch and rethrow or use scope(failure) with
- * exceptions thrown by the Pack methods, but must not silence them.
+ * the pack and also used for unpacking, which allows estimation
+ * during network transfers.
  * 
  * This system does not use GC memory and cannot keep GC allocated
- * objects alive. All participating objects must use tool.reference.
+ * objects alive. All participating objects must use tools.reference.
  */
+
+//TODO A system capable of dealing with writing the pack size after OR before is needed.
 
 module raider.tools.packable;
 
 import std.traits;
-import derelict.physfs.physfs;
 import raider.tools.stream;
 import raider.tools.array;
 import raider.tools.reference;
 
+/**
+ * Interface for objects that can be serialised and deserialised.
+ * 
+ * pack must not write to the object.
+ * pack and unpack must leave the object in a valid state.
+ * They must not silence exceptions thrown by the stream.
+ * They may catch and rethrow or use scope(failure).
+ * They may throw their own exceptions.
+ */
 interface Packable
+{
+	void pack(P!Stream) const;
+	void unpack(P!Stream);
+}
+
+version(none)
+interface Whattable
 {
 	void toPack(P!Pack);
 	void fromPack(P!Pack);
 	uint estimatePackSize();
+
 	
 	/**
 	 * Save packable to file.
@@ -80,6 +95,7 @@ interface Packable
 	}
 }
 
+version(none)
 /**
  * Unit of packing work.
  */
@@ -124,6 +140,19 @@ public:
 			//TODO Anything but taskPool.put(task)
 			//Note, the task queue must receive a strong reference.
 			//The user may discard the Task.
+
+			/*Use custom parallel for-each, not work stealing.
+			Our individual items
+			a) Don't need to yield
+			b) Don't need to spawn new work items
+			c) Have no dependencies
+
+			For disk access, use a mutex-protected queue.
+
+			Why does OpenCL implement work stealing? Why is it used by Cycles?
+			Is it just a generic mechanism?
+			Deja vu.
+			 */
 
 			run;
 		}
@@ -183,85 +212,16 @@ public:
 	@property string activity() { return _activity; }
 	@property void activity(string value) { _activity = value; }
 	
-	/**
-	 * Write a struct or packable to the pack.
-	 * 
-	 * If the item does not define toPack, it is written
-	 * as it appears in memory.
-	 */
-	final void write(T)(T data)
-	{
-		T[1] temp = (&data)[0..1];
-		writeTuple(temp);
-	}
 
-	final void read(T)(ref T data)
-	{
-		T[1] temp = (&data)[0..1];
-		readTuple(temp);
-	}
-	
-	/**
-	 * Write a fixed-length array of structs or packables.
-	 * 
-	 * If the items do not define toPack, they are written
-	 * as they appear in memory.
-	 */
-	final void writeTuple(T)(T[] data)
-	{
-		static if(hasMember!(T, "toPack"))
-			foreach(ref T packable; data)
-				packable.toPack(P!Pack(this));
-		else
-			stream.write(data);
-	}
-
-	final void readTuple(T)(T[] data)
-	{
-		static if(hasMember!(T, "fromPack"))
-			foreach(ref T packable; data)
-				packable.fromPack(P!Pack(this));
-		else
-			stream.read(data);
-	}
-
-	/**
-	 * Write an array of structs or packables.
-	 * 
-	 * If the items do not define toPack, they are written
-	 * as they appear in memory.
-	 */
-	final void writeArray(T)(Array!T data)
-	{
-		write(data.size);
-		writeTuple(data[]);
-	}
-
-	final void readArray(T)(ref Array!T data)
-	{
-		uint size;
-		read(size);
-		data.size = size;
-
-		static if(is(T == class))
-		{
-			foreach(ref T packable; data) packable = New!T();
-		}
-		
-		readTuple(data[]);
-	}
 }
 
 final class PackException : Exception
-{
-	this(string msg)
-	{
-		super(msg);
-	}
-}
+{ import raider.tools.exception; mixin SimpleThis; }
+
 /* TODO Update tests
 //Bug prevents compilation of UnittestB (depends on A) inside the unit test.
 //http://d.puremagic.com/issues/show_bug.cgi?id=852
+
 version(unittest)
 {
 	final class UnittestA : Packable
