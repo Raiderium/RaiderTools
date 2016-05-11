@@ -1,9 +1,7 @@
 module raider.tools.looper;
 
-import std.stdio;
 import core.thread;
 import core.time;
-import std.datetime;
 
 /**
  * Controls a game loop.
@@ -30,13 +28,13 @@ class Looper
 	int stepMax = 8; ///Substep (aka frame skip) limit.
 	double timeScale = 1.0; ///Game time elapsed in seconds for every real second
 	ulong logicDelta = 16667; ///Game time between logic updates in microseconds
-
-	StopWatch sw;
+	bool _running;
+	TickDuration tdStart;
 
 	//Advances real time and returns microseconds of game time
 	ulong realStep()
 	{
-		ulong now = sw.peek().usecs;
+		ulong now = (TickDuration.currSystemTick - tdStart).usecs;
 		double result = cast(double)(now - realTime);
 		realTime = now;
 		return cast(ulong)(result*timeScale);
@@ -46,7 +44,12 @@ public:
 
 	@property bool running()
 	{
-		return sw.running;
+		return _running;
+	}
+
+	@property void running(bool value)
+	{
+		_running = false;
 	}
 
 	@property void hertz(uint value)
@@ -71,13 +74,12 @@ public:
 		logicTime = 0;
 		realTime = 0;
 		steps = 0;
-		sw.reset();
-		sw.start;
+		tdStart = TickDuration.currSystemTick;
 	}
 
 	bool step()
 	{
-		if(!sw.running) return false;
+		if(!_running) return false;
 
 		time += realStep();
 
@@ -112,10 +114,4 @@ public:
 		//Using vsync is optimal.
 		steps = 0;
 	}
-
-	void stop()
-	{
-		sw.stop();
-	}
 }
-
