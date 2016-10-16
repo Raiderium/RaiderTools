@@ -6,6 +6,12 @@ import core.cpuid;
 import raider.tools.array;
 import raider.tools.barrier;
 
+version(Windows)
+{
+	import core.sys.windows.windows;
+	extern(Windows) DWORD SetThreadAffinityMask(HANDLE,DWORD);
+}
+
 package int tid = -1;
 
 __gshared
@@ -71,13 +77,9 @@ shared static this()
 			//Lock to core
 			version(Windows)
 			{
-				import raider.tools.windows;
 				if(!SetThreadAffinityMask(GetCurrentThread(), 1u << tid))
 					assert(false, "Failed to set thread affinity");
 			}
-
-			/* Snippet: this is how to set affinity from outside.
-				SetThreadAffinityMask(OpenThread(THREAD_ALL_ACCESS, false, thread.id), 1u<<x) */
 		});
 
 	//Put workers to sleep.

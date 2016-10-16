@@ -41,6 +41,28 @@
  * struct initialisers.
  */
 
+/*
+ * Huge TODO: Incorporate std.experimental.allocator.
+ * This will allow to select situation-appropriate 
+ * allocation strategies.
+ * 
+ * This component of Phobos was approved July 25th 2015
+ * to unanimous approval. It is an exceptionally useful
+ * application of D's template mechanisms. It absolutely
+ * must be leveraged before a single line of reinvented
+ * free-list code appears.
+ * 
+ * As noted at
+ * https://wiki.dlang.org/Review/std.experimental.allocator
+ * , it is not an abstraction of lifetime management.
+ * That is, it doesn't offer an alternative to the collector,
+ * but it aids greatly in implementing one.
+ * 
+ * Notes on implementation:
+ * Use quantizer to replace capacity-doubling in tools.array.
+ * Use affix_allocator to attach reference count header.
+ */
+
 module raider.tools.reference;
 
 import std.conv : emplace;
@@ -89,6 +111,7 @@ template hasGarbage(T)
 	}
 }
 
+/* DUB 1.0.0 seems to dislike version(unittest), causing linker errors.
 version(unittest)
 {
 	struct hasGarbageTest
@@ -106,7 +129,7 @@ version(unittest)
 		//static assert(!hasGarbage!(R!(void*))); TODO Pointer boxing?
 		static assert(hasGarbage!(void*));
 	}
-}
+}*/
 
 //Encapsulation allows to use structs as if they were classes.
 private template Cap(T)
@@ -156,9 +179,6 @@ public R!T New(T, Args...)(auto ref Args args)
 
 	//Init header
 	*header = Header.init;
-
-	//TODO Investigate any alignment issues that might affect performance.
-	//TODO Implement free lists..
 	
 	//Got anything the GC needs to worry about?
 	static if(hasGarbage!T)
@@ -485,7 +505,7 @@ if(C == "R" || C == "W" || C == "P")
 				//numeric types don't need destruction
 				_void = o;
 				
-				assert(header.pointerCount == 0);
+				assert(header.pointerCount == 0, "Pointer references remain.");
 			}
 		}
 
@@ -495,11 +515,12 @@ if(C == "R" || C == "W" || C == "P")
 	}
 }
 
+/*
 version(unittest)
 {
-	/* Of all the things that need to print stuff for
-	 * debugging purposes, reference counting is about
-	 * the neediest. */
+	// Of all the things that need to print stuff for
+	// debugging purposes, reference counting is about
+	// the neediest.
 	import std.stdio;
 	int printfNope(in char* fmt, ...) { return 0; }
 	alias printfNope log;
@@ -670,4 +691,4 @@ version(unittest)
 			//Bar b = { f }; //No copy semantics here, creates untracked reference and double-free occurs
 		}
 	}
-}
+}*/

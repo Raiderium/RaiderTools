@@ -14,7 +14,7 @@ import std.bitmanip;
 /**
  * Array stores items in contiguous memory.
  * 
- * Items must tolerate being moved without consultation.
+ * Items must tolerate being moved without consultation. How perfectly awful!
  * 
  * Items will be registered with the GC if they contain aliasing.
  * The Array struct itself contains no aliasing the GC needs to know about.
@@ -76,8 +76,8 @@ public:
 	}
 
 	@property T* ptr() { return data; }
-	@property size_t capacity() { return _log ? 1 << _log : 0; }
-	@property size_t size() { return _size; }
+	@property size_t capacity() const { return _log ? 1 << _log : 0; }
+	@property size_t size() const { return _size; }
 	
 	/**
 	 * Set array size.
@@ -108,7 +108,7 @@ public:
 
 	ref T opIndex(in size_t i)
 	{
-		assert(i < _size, "Index out of bounds");
+		assert(i < _size, "Index [ " ~ to!string(i) ~ "] is out of bounds. Array size is " ~ to!string(length) ~ ".");
 		return data[i];
 	}
 
@@ -124,8 +124,8 @@ public:
 	
 	auto opSlice(size_t x, size_t y)
 	{
-		assert(y <= _size, "Slice indices out of bounds");
-		assert(x <= y, "Slice indices out of order");
+		assert(y <= _size, "Slice [" ~ to!string(x) ~ " .. " ~ to!string(y) ~ "] is out of bounds. Array size is " ~ to!string(length) ~ ".");
+		assert(x <= y, "Slice [" ~ to!string(x) ~ " .. " ~ to!string(y) ~ "] is out of order. Don't do drugs, kids.");
 		return data[x..y];
 	}
 	
@@ -139,7 +139,7 @@ public:
 		assert(y <= _size && x <= y);
 		data[x..y] = t[];
 	}
-	
+
 	/**
 	 * Insert a range of T.init items
 	 * 
@@ -179,9 +179,6 @@ public:
 			foreach(ref item; data[index..index+amount])
 				typeid(T).destroy(&item);
 	}
-
-	//TODO Try allocating on powers of two bytes, not powers of two item counts.
-	//Preallocation is very important!
 
 	//Call postblit on a range
 	private void postblitRange(size_t index, size_t amount)
@@ -314,7 +311,7 @@ public:
 	}
 
 	/**
-	 * Remove a range of items and return them.
+	 * Remove a range of items and return them in a new array.
 	 */
 	Array!T remove(size_t index, size_t amount)
 	{
@@ -451,14 +448,17 @@ public:
 	 * 
 	 * This uses binary search to find the insert index.
 	 * The array must be in a sorted state before this
-	 * is called.
+	 * is called. 
+	 * 
+	 * In debug builds, this checks the array is sorted.
+	 * Don't be surprised if your algorithm is slow as molasses.
 	 * 
 	 * This swaps the item into the array, replacing 
 	 * the supplied item with T.init.
 	 */
 	void addSorted(alias field = "")(auto ref T item)
 	{
-		assert(sorted!field);
+		assert(sorted!field); //Be that guy
 
 		if(_size)
 		{
@@ -503,6 +503,10 @@ public:
 	 * Sort array using 32-bit radix sort.
 	 * 
 	 * Implementation based on http://stereopsis.com/radix.html
+	 *
+	 * Sorts on a uint or float field of T, specified by 'field'.
+	 * See unittests for usage examples. If no field is given,
+	 * it sorts on T, which must be uint or float.
 	 * 
 	 * This is not an in-place sort. It needs scratch space to
 	 * work with; provide an array of the same type and it will
@@ -510,9 +514,6 @@ public:
 	 * performance over multiple sorts. Note the interior data
 	 * pointer is currently swapped with the scratch array.
 	 * 
-	 * Sorts on a uint or float field of T, specified by 'field'.
-	 * See unittests for usage examples. If no field is given,
-	 * it sorts on T, which must be uint or float.
 	 */
 	void radixSort(alias field = "")(ref Array!T scratch)
 	{
@@ -520,7 +521,7 @@ public:
 
 		scratch.size = _size; //no-op on repeat invocations
 
-		//11-bit histograms on stack
+		//11-bit histograms on stack (perhaps use TLS? It's 24.5 kilobytes)
 		immutable uint kb = 2048;
 		uint[kb * 3] b;
 		uint* b0 = b.ptr;

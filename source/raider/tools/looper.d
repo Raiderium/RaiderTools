@@ -70,6 +70,7 @@ public:
 
 	void start()
 	{
+		_running = true;
 		time = 0;
 		logicTime = 0;
 		realTime = 0;
