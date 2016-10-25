@@ -1,5 +1,6 @@
 module raider.tools.map;
 
+import std.conv;
 import std.algorithm : swap, cmp;
 import std.exception;
 import raider.tools.array;
@@ -61,7 +62,7 @@ struct Map(K, V)
 		if(pairs.find(pair, index))
 			return pairs[index].value;
 		else
-			throw new MapException("'" ~ key ~ "' not in map");
+			throw new MapException("'" ~ to!string(key) ~ "' not in map");
 	}
 
 	/**
