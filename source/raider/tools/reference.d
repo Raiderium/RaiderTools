@@ -195,61 +195,6 @@ public R!T New(T, Args...)(auto ref Args args)
 }
 
 /**
- * Allocates and default constructs a reference counted object by class name.
- * 
- * Warning: Currently doesn't default construct.
- * Useless except for classes without complex construction.
- * 
- * This method is adapted from object.factory.
- */
-public R!Object New(in char[] classname)
-{
-	R!Object result;
-
-	const ClassInfo ci = ClassInfo.find(classname);
-
-	//Get upset if a class can't be instantiated
-	if(!ci) { return result; }
-	if(ci.m_flags & 8 && !ci.defaultConstructor) return result;
-	if(ci.m_flags & 64) return result; // abstract
-
-	//Allocate space for the header + object
-	size_t size = ci.init.length;
-	void* m = core.stdc.stdlib.malloc(Header.sizeof + size);
-	if(!m) onOutOfMemoryError;
-	scope(failure) core.stdc.stdlib.free(m);
-
-	//Obtain pointers to header and memory chunk
-	Header* header = cast(Header*)m;
-	void* chunk = m + Header.sizeof;
-
-	//Init header
-	*header = Header.init;
-
-	//Assume the GC is interested
-	GC.addRange(chunk, size);
-	header.registeredWithGC = true;
-	scope(failure) GC.removeRange(chunk);
-
-	//Init object
-	chunk[0 .. size] = ci.init[];
-
-	//Default-construct (if it has one)
-	if(ci.m_flags & 8 && ci.defaultConstructor)
-	{
-		//This fails for some reason.
-		//ci.defaultConstructor(cast(Object)chunk);
-
-		//Source says defaultConstructor is void function(Object)..
-		//static assert(is(typeof(ci.defaultConstructor) == void function(Object)));
-		//static assert(__traits(compiles, cast(Object)chunk));
-	}
-
-	result._void = chunk;
-	return result;
-}
-
-/**
  * A strong reference.
  * 
  * When there are no more strong references to an object
@@ -270,7 +215,7 @@ public alias Reference!"R" R;
  * 
  * Weak references are like pointers, except they 
  * can check if the referent is alive and promote
- * safely if so, and can't dereference directly.
+ * to a strong reference, but not access it directly.
  * In fact, weak references aren't much like
  * pointers at all. I lied.
  */
@@ -373,8 +318,14 @@ if(C == "R" || C == "W" || C == "P")
 			//Assign a reference of a different strength
 			else
 			{
-				alias Reference!C RefC; //for some reason D dislikes Reference!C!A
-				this = RefC!A(rhs._referent); //can't really blame it
+				//DMD doesn't like Reference!C!A or (Reference!C)!A
+
+				//What is this syntax and why does it work
+				this = Reference!C(!A)(rhs._referent);
+
+				//I'm really quite afraid of it
+				alias Reference!C ReferenceC;
+				static assert(Reference!C(!A) == ReferenceC!A);
 			}
 		}
 
@@ -458,7 +409,7 @@ if(C == "R" || C == "W" || C == "P")
 					}
 
 					static if(C == "W") atomicOp!"+="(header.weakCount, 1);
-					static if(C == "P") atomicOp!"+="(header.pointerCount, 1);
+					static if(C == "P") version(assert) { atomicOp!"+="(header.pointerCount, 1); }
 				}
 			}
 			
@@ -470,6 +421,7 @@ if(C == "R" || C == "W" || C == "P")
 					{
 						if(atomicOp!"-="(header.strongCount, 1) == 0)
 						{
+
 							_dtor;
 							if(atomicOp!"-="(header.weakCount, 1) == 0) _free;
 							//Reminder: Exceptions thrown from destructors are errors (unrecoverable)
@@ -477,7 +429,7 @@ if(C == "R" || C == "W" || C == "P")
 					}
 
 					static if(C == "W") if(atomicOp!"-="(header.weakCount, 1) == 0) _free;
-					static if(C == "P") atomicOp!"-="(header.pointerCount, 1);
+					static if(C == "P") assert(atomicOp!"-="(header.pointerCount, 1) != uint.max, T.stringof ~ " pointer count underflow");
 				}
 			}
 		}
@@ -504,14 +456,21 @@ if(C == "R" || C == "W" || C == "P")
 				else static if(is(T == class) || is(T == interface)) destroy(_referent);
 				//numeric types don't need destruction
 				_void = o;
-				
-				assert(header.pointerCount == 0, "Pointer references remain.");
+
+				//version(assert) assert(...) looks silly, but it's currently unavoidable
+				//https://github.com/dlang/dmd/pull/1614#issuecomment-13091053
+				version(assert) //Without this, DMD 'must' semantically analyse the assert..
+					assert(header.pointerCount == 0, "P!"~T.stringof~" references remain.");
+				//..which leads to it complaining that pointerCount doesn't exist
 			}
 		}
 
 		//Detect reference cycles
 		static if(C == "R" && !__traits(compiles, FieldTypeTuple!T))
 			static assert(0, "Reference cycle detected.");
+		// Why people continue to list reference cycles as a 
+		// reason to avoid reference counting is beyond me.
+		// People can be so afraid of describing ownership.
 	}
 }
 
