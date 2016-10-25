@@ -33,8 +33,9 @@ struct Array(T)
 		mixin(bitfields!
 		(
 			bool, "_cached", 1, //capacity cannot decrease
+			bool, "_moved", 1, 
 			uint, "_log", 6, //log2 of capacity
-			uint, "", 25, //free parking
+			uint, "", 24, //free parking
 		)); 
 	}
 
@@ -96,6 +97,13 @@ public:
 	@property bool cached() { return _cached; }
 	@property void cached(bool value) { _cached = value; }
 
+	/**
+	 * If true, item locations were indirectly changed by method calls since the last reset to false.
+	 * The movement of explicitly affected items is not included.
+	 */
+	@property bool moved() { return _moved; }
+	@property void moved(bool value) { _moved = value; }
+
 	bool opEquals(const T[] that)
 	{
 		return data[0.._size] == that;
@@ -128,7 +136,12 @@ public:
 		assert(x <= y, "Slice [" ~ to!string(x) ~ " .. " ~ to!string(y) ~ "] is out of order. Don't do drugs, kids.");
 		return data[x..y];
 	}
-	
+
+	auto opDollar()
+	{
+		return _size;
+	}
+
 	void opSliceAssign(T[] t)
 	{
 		data[0.._size] = t[];
@@ -199,6 +212,7 @@ public:
 	{
 		assert(index <= _size);
 		if(amount == 0) return;
+		if(index < _size) _moved = true;
 
 		//Fun mental exercise: Walk through this function with the assumption data == null.
 		//The code fair dances on the precipice of disaster.
@@ -220,6 +234,7 @@ public:
 			}
 			free(data);
 			data = newData;
+			_moved = true;
 		}
 		else memmove(data+index+amount, data+index, T.sizeof * (_size-index));
 
@@ -231,6 +246,7 @@ public:
 	{
 		assert(index + amount <= _size);
 		if(amount == 0) return;
+		if(index + amount < _size) _moved = true;
 
 		uint log = 0;
 		while((log ? 1 << log : 0) < (_size - amount)) log = log+1;
@@ -248,6 +264,7 @@ public:
 			}
 			free(data);
 			data = newData;
+			_moved = true;
 		}
 		else memmove(data+index, data+index+amount, T.sizeof * (_size-(index+amount)));
 		
@@ -305,7 +322,7 @@ public:
 		assert(index < _size);
 		
 		T item = void;
-		swap(item, data[index]);
+		memcpy(&item, data+index, T.sizeof);
 		destroyRaw(index, 1);
 		return item;
 	}
@@ -331,7 +348,7 @@ public:
 		assert(_size);
 
 		T item = void;
-		swap(item, data[_size-1]);
+		memcpy(&item, data+_size-1, T.sizeof); 
 		destroyRaw(_size-1, 1);
 		return item;
 	}
@@ -344,10 +361,11 @@ public:
 		assert(index < _size);
 		
 		T item = void;
-		swap(item, data[index]);
+		memcpy(&item, data+index, T.sizeof);
 		if(index != _size-1)
 		{
 			swap(data[_size-1], data[index]);
+			_moved = true;
 		}
 		destroyRaw(_size-1, 1);
 		return item;
