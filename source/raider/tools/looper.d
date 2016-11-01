@@ -59,7 +59,7 @@ public:
 
 	@property double stepSize()
 	{
-		return cast(double)(logicDelta) / 1000.0;
+		return cast(double)(logicDelta) / 1000000.0;
 	}
 
 	///Graphical frame interpolation factor
