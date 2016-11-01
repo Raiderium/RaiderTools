@@ -131,23 +131,6 @@ version(unittest)
 	}
 }*/
 
-//Encapsulation allows to use structs as if they were classes.
-private template Cap(T)
-{
-	static if(is(T == class) || is(T == interface)) alias T Cap;
-	else static if(is(T == struct) || isScalarType!T)
-	{
-		class Cap
-		{
-			T _t; alias _t this;
-			static if(is(T == struct))
-			this(A...)(A a) { _t = T(a); } 
-			else this(T t = 0) { _t = t; }
-		}
-	}
-	else static assert(0, T.stringof~" can't be boxed");
-}
-
 private struct Header
 {
 	uint strongCount = 1;
@@ -162,13 +145,13 @@ private struct Header
  * Encapsulates structs and scalar types.
  */
 public R!T New(T, Args...)(auto ref Args args)
-	if(is(T == class) || is(T == struct) || isScalarType!T)
+	if(is(T == class))
 {
 	//Get upset if a class can't be instantiated
-	if(false) static if(is(T == class)) T t = new T(args);
+	if(false) T t = new T(args);
 
 	//Allocate space for the header + object
-	enum size = __traits(classInstanceSize, Cap!T);
+	enum size = __traits(classInstanceSize, T);
 	void* m = core.stdc.stdlib.malloc(Header.sizeof + size);
 	if(!m) onOutOfMemoryError;
 	scope(failure) core.stdc.stdlib.free(m);
@@ -190,7 +173,7 @@ public R!T New(T, Args...)(auto ref Args args)
 
 	//Construct with emplace
 	R!T result;
-	result._referent = emplace!(Cap!T)(chunk[0..size], args);
+	result._referent = emplace!(T)(chunk[0..size], args);
 	return result;
 }
 
@@ -260,12 +243,11 @@ private template Reference(string C)
 if(C == "R" || C == "W" || C == "P")
 {
 	struct Reference(T)
-	if(is(T == class) || is(T == interface) || is(T == struct) || isScalarType!T)
+	if(is(T == class) || is(T == interface))
 	{ private:
-		alias Cap!T B;
 
 		//Referent and void union (abandon hope, Java developers)
-		union { public B _referent = null; void* _void; }
+		union { public T _referent = null; void* _void; }
 
 		//Header hides before _void
 		ref shared(Header) header()
@@ -274,6 +256,7 @@ if(C == "R" || C == "W" || C == "P")
 	public:
 
 		//Make the reference behave loosely like the referent
+		//I hesitate to attempt to clarify exactly *how* loosely
 		static if(C != "W")
 		{
 			alias _referent this;
@@ -298,11 +281,11 @@ if(C == "R" || C == "W" || C == "P")
 		//ctor, copy, dtor semantics
 		static if(hasRefSem)
 		{
-			this(B that) { _referent = that; _incref; }
+			this(T that) { _referent = that; _incref; }
 			this(this) { _incref; }
 			~this() { _decref;  }
 		}
-		else this(B that) { _referent = that; }
+		else this(T that) { _referent = that; }
 
 		//Assign null
 		void opAssign(typeof(null) wut)
@@ -331,7 +314,7 @@ if(C == "R" || C == "W" || C == "P")
 
 		A opCast(A)() const
 		{
-			static if(isReference!A) return A(cast(A.B)_referent);
+			static if(isReference!A) return A(cast(typeof(A._referent))_referent);
 			else
 			{
 				static assert(C != "W", "Weak reference cannot be cast.");
@@ -447,13 +430,9 @@ if(C == "R" || C == "W" || C == "P")
 		{
 			void _dtor()
 			{
-				//alias this makes it mildly impossible to call B.~this
-				//FIXME Likely to explode if an encapsulated T uses alias this
-
 				//Destroy referent. Temporary variable used because destroy() assigns null.
 				void* o = _void;
-				static if(is(T == struct)) destroy(_referent._t);
-				else static if(is(T == class) || is(T == interface)) destroy(_referent);
+				destroy(_referent);
 				//numeric types don't need destruction
 				_void = o;
 
