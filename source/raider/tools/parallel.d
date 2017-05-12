@@ -44,7 +44,6 @@ public void parallelTask(void delegate() task)
 	assert(work is null);
 	
 	work = task;
-
 	barrier.wait;
 	work();
 	barrier.wait;
@@ -52,11 +51,10 @@ public void parallelTask(void delegate() task)
 }
 
 shared static this()
-{ //Start worker threads.
-
+{
+	//Start worker threads.
 	tidMax = threadsPerCPU;
 	tid = 0; //Main thread has tid 0.
-
 	barrier = new Barrier(tidMax);
 
 	foreach(x; 1..tidMax)
@@ -116,8 +114,7 @@ public:
  * Operates on the Array type only.
  * Does not provide the index of items.
  * 
- * foreach(item; parallel(array, unit = 0, sleep = true))
- * {  }
+ * foreach(item; parallel(array)) {  }
  * 
  * unit is how many elements to process between load
  * balances. For expensive loop bodies with variable
@@ -125,64 +122,65 @@ public:
  * numbers, or 0 to use the highest possible number,
  * creating one unit per core, for number crunching.
  * 
- * Sleep causes threads sleep rather than spin-wait.
- * Use when there will be no more work afterwards or
- * if the work is very unbalanced.
+ * sleep makes threads sleep rather than spin-wait.
+ * This is usually preferable. Spin waiting is only
+ * useful with small, carefully balanced workloads.
  * 
  * Call parallel() from the main thread only.
+ * Workers cannot create new tasks.
  */
-ParallelForeach!T parallel(T)(ref Array!T array, size_t unit = 0, bool sleep = true)
+auto parallel(T)(ref Array!T array, size_t unit = 0, bool sleep = true)
 {
-	ParallelForeach!T pf = {array.ptr, array.size, unit, sleep};
+	struct ParallelForeach //yer a wizard harry
+	{ //you're a hairy wizard
+		T* data;
+		size_t size;
+		size_t unit;
+		bool sleep;
+		
+		int delegate(ref T) the_delegate;
+		
+		shared size_t x;
+		
+		void the_loop()
+		{
+			//Warm start
+			size_t x0 = unit * tid;
+			size_t x1 = x0 + unit;
+			
+			while(true)
+			{
+				if(x0 >= size) break;
+				if(x1 > size) x1 = size;
+				foreach(i; x0..x1) the_delegate(data[i]);
+				
+				x1 = atomicOp!"+="(x, unit);
+				x0 = x1 - unit;
+			}
+		}
+		
+		int opApply(int delegate(ref T) dg)
+		{
+			//Ceiling division
+			if(unit == 0) unit = (size / tidMax) + (size % tidMax != 0);
+			
+			//Warm start
+			x = tidMax * unit;
+			
+			the_delegate = dg;
+			parallelTask(&the_loop);
+			if(sleep) parallelSleep;
+			return 0;
+		}
+	} //it's funny because this is a voldemort type
+	//laugh at my jokes >:(
+
+	ParallelForeach pf = {array.ptr, array.size, unit, sleep};
 	return pf;
 }
 
-//TODO Implement mixin-based parallel() to remove delegate call overhead.
-
-private struct ParallelForeach(T)
-{
-	T* data;
-	size_t size;
-	size_t unit;
-	bool sleep;
-
-	int delegate(ref T) the_delegate;
-
-	shared size_t x;
-
-	void the_loop()
-	{
-		//Warm start
-		size_t x0 = unit * tid;
-		size_t x1 = x0 + unit;
-
-		while(true)
-		{
-			if(x0 >= size) break;
-			if(x1 > size) x1 = size;
-			foreach(i; x0..x1) the_delegate(data[i]);
-
-			x1 = atomicOp!"+="(x, unit);
-			x0 = x1 - unit;
-		}
-	}
-
-	int opApply(int delegate(ref T) dg)
-	{
-		//Ceiling division
-		if(unit == 0) unit = (size / tidMax) + (size % tidMax != 0);
-
-		//Warm start
-		x = tidMax * unit;
-
-		the_delegate = dg;
-		parallelTask(&the_loop);
-		if(sleep) parallelSleep;
-		return 0;
-	}
-}
-
-
+//TODO Implement mixin-based parallel() to remove delegate invocation overhead
+//TODO Revert to sane parallel() when the mixin becomes a mind-melting super-mistake
 
 unittest
 {
@@ -194,12 +192,12 @@ unittest
 /* About worker-local storage
  * 
  * Thread-local stuff is allocated for every D thread, and
- * is thus very difficult to allocate for class instances.
+ * is thus quite difficult to allocate per class instance.
  * Whenever a new thread appears, all instances are forced
  * to reallocate, even if the new thread has no bearing on
  * the class and is outside the pool of worker threads.
  * 
- * Hrm. I say forced; it's rarely implemented in practice.
+ * Well I say forced, it's rarely implemented in practice.
  * 
  * This module allows classes to create thread-local stuff
  * only for worker threads, and not have to reallocate for
