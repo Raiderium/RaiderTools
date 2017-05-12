@@ -15,7 +15,7 @@ import raider.tools.reference;
  * 
  * Structs may implement these methods for compile-time binding.
  */
-interface Packable
+@RC interface Packable
 {
 	/**
 	 * Write the object to a stream.
@@ -23,7 +23,7 @@ interface Packable
 	 * Must not modify the object.
 	 * Must propagate stream exceptions - catch and rethrow or use scope(failure).
 	 */
-	void pack(P!Stream) const;
+	void pack(Stream) const;
 
 	/**
 	 * Read the object from a stream.
@@ -32,7 +32,7 @@ interface Packable
 	 * Must leave the object in a valid state.
 	 * Must propagate stream exceptions - catch and rethrow or use scope(failure).
 	 */
-	void unpack(P!Stream);
+	void unpack(Stream);
 
 	/**
 	 * Estimate a packed size in bytes.
@@ -130,7 +130,7 @@ public:
 				if(packSize == 0)
 				{
 					singularity.reset;
-					packable.pack(cast(P!Stream)singularity);
+					packable.pack(cast(Stream)singularity);
 					packSize = singularity.bytesWritten;
 				}
 				else packSizeEstimated = true;
@@ -141,7 +141,7 @@ public:
 
 				//Write the pack.
 				packOffset = stream.bytesWritten;
-				packable.pack(stream.p);
+				packable.pack(cast(Stream)stream);
 
 				//Find the real packed size
 				if(packSizeEstimated) packSize = stream.bytesWritten - packOffset;
@@ -160,7 +160,7 @@ public:
 				headOffset = stream.bytesRead;
 				stream.read(packSize);
 				packOffset = stream.bytesRead;
-				packable.unpack(stream.p);
+				packable.unpack(cast(Stream)stream);
 			}
 			_ready = true;
 		}

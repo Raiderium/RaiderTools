@@ -9,7 +9,7 @@ import std.conv : to;
 /**
  * Takes data from somewhere, and puts it elsewhere.
  */
-abstract class Stream
+@RC abstract class Stream
 {private:
 	string source; //Describes the remote endpoint
 	string activity; //Describes what is being written or read
@@ -131,7 +131,7 @@ public:
 
 import std.stdio;
 
-final class FileStream : Stream
+@RC final class FileStream : Stream
 {private:
 	File file;
 	string filename;
@@ -215,7 +215,7 @@ public:
 	}
 }
 
-final class SingularityStream : Stream
+@RC final class SingularityStream : Stream
 {
 	this() { super("A black hole", Mode.Write); }
 	override void writeBytes(const(ubyte)[] bytes) { }
@@ -224,8 +224,13 @@ final class SingularityStream : Stream
 }
 
 package R!SingularityStream singularity;
-static this() { singularity = New!SingularityStream(); }
 
+static this()
+{
+	singularity = New!SingularityStream();
+}
+
+//TODO Move NetworkStream to new library RaiderNetwork.
 /**
  * Transmits over an IP network.
  * 
@@ -239,7 +244,7 @@ static this() { singularity = New!SingularityStream(); }
  * socket. NetworkStreams can then be created and
  * destroyed rapidly without touching the socket.
  */
-final class NetworkStream : Stream
+@RC final class NetworkStream : Stream
 {
 	this()
 	{
@@ -253,7 +258,7 @@ final class NetworkStream : Stream
 /**
  * Implements a circular buffer.
  */
-final class MemoryStream : Stream
+@RC final class MemoryStream : Stream
 {
 	this()
 	{
