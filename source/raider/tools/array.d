@@ -1,15 +1,15 @@
 module raider.tools.array;
 
 import raider.tools.reference;
-import core.stdc.stdlib;
-import core.memory;
-import std.conv;
+import core.memory : GC;
+import std.conv : to;
 import core.stdc.string : memcpy, memmove;
-import std.traits;
+import std.traits : hasMember;
 import std.algorithm : swap, initializeAll;
 static import std.algorithm;
 import std.functional : binaryFun;
-import std.bitmanip;
+import std.bitmanip : bitfields;
+import core.stdc.stdlib : malloc, mfree = free; //replace with mallocator, quantizer
 
 /**
  * Array stores items in contiguous memory.
@@ -24,7 +24,7 @@ import std.bitmanip;
  */
 struct Array(T)
 {package:
-	T* data = null;
+	@NotGarbage T* data = null;
 	size_t _size = 0; //Number of items stored
 
 	union 
@@ -227,12 +227,14 @@ public:
 
 			memcpy(newData, data, T.sizeof * index);
 			memcpy(newData+index+amount, data+index, T.sizeof * (_size - index));
-			if(hasGarbage!T)
+			static if(
+				(!is(T == class) && hasGarbage!T) || 
+				( is(T == class) && !(isReferentType!T || isUnmanagedType!T)))
 			{
 				GC.addRange(cast(void*)newData, T.sizeof * capacity);
 				GC.removeRange(cast(void*)data);
 			}
-			free(data);
+			mfree(data);
 			data = newData;
 			_moved = true;
 		}
@@ -257,12 +259,14 @@ public:
 			T* newData = cast(T*)malloc(T.sizeof * capacity);
 			memcpy(newData, data, T.sizeof * index);
 			memcpy(newData+index, data+index+amount, T.sizeof * (_size-(index+amount)));
-			if(hasGarbage!T)
+			static if(
+				(!is(T == class) && hasGarbage!T) || 
+				( is(T == class) && !(isReferentType!T || isUnmanagedType!T)))
 			{
 				GC.addRange(cast(void*)newData, T.sizeof * capacity);
 				GC.removeRange(cast(void*)data);
 			}
-			free(data);
+			mfree(data);
 			data = newData;
 			_moved = true;
 		}
@@ -397,7 +401,6 @@ public:
 		return false;
 	}
 
-
 	/**
 	 * Find and remove an item.
 	 * 
@@ -409,6 +412,22 @@ public:
 		if(find!field(that, index))
 		{
 			remove(index);
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Find and remove an item, potentially disrupting item order.
+	 * 
+	 * Returns true on success, false if the item was not found.
+	 */
+	bool removeItemFast(alias field = "", F)(const F that)
+	{
+		size_t index;
+		if(find!field(that, index))
+		{
+			removeFast(index);
 			return true;
 		}
 		return false;
@@ -617,9 +636,15 @@ public:
 	}
 }
 
+
 unittest
 {
+	static assert(!hasGarbage!(Array!uint));
+	static assert(!hasGarbage!(Array!(uint*)));
+
 	Array!uint a1;
+
+	static assert(!hasGarbage!(a1));
 
 	a1.add(1);
 	assert(a1[0] == 1);
