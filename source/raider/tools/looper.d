@@ -2,117 +2,156 @@ module raider.tools.looper;
 
 import core.thread;
 import core.time;
+import std.conv;
 
 /**
  * Controls a game loop.
  * 
  * looper.start;
- * while(looper.running)
+ * while(looper.loop)
  * {
  *     while(looper.step)
  *     {
- *         step(looper.stepSize);
+ *         step();
  *     }
  *     draw();
- *     looper.sleep;
+ *     if(vsync) vsync();
+ *     else looper.sleep;
  * }
  * 
- * Use looper.frameTime to interpolate graphics between the last two logic updates.
+ * Use looper.frameTime to interpolate graphics between the last two logic updates
  */
 class Looper
 {private:
-	ulong time = 0; // Game time elapsed in microseconds since start()
-	ulong logicTime = 0; ///Logical time elapsed in microseconds since start()
-	ulong realTime = 0; ///Real time elapsed in microseconds since start()
-	int steps = 0; ///Substeps taken
-	int stepMax = 8; ///Substep (aka frame skip) limit.
-	double timeScale = 1.0; ///Game time elapsed in seconds for every real second
-	ulong logicDelta = 16667; ///Game time between logic updates in microseconds
+	//All times are in microseconds
+	ulong logicTime = 0; 		//Logical time elapsed
+	ulong logicDelta = 16667; 	//Logical time elapsed per step
+	ulong logicMax = 100000; 	//Maximum time between draws (limits catch-up steps)
+	bool  logicForce;			//Prevents logicMax from preventing at least 1 step
+	ulong logicStart;
+
 	bool _running;
-	TickDuration tdStart;
 
-	//Advances real time and returns microseconds of game time
-	ulong realStep()
-	{
-		ulong now = (TickDuration.currSystemTick - tdStart).usecs;
-		double result = cast(double)(now - realTime);
-		realTime = now;
-		return cast(ulong)(result*timeScale);
-	}
-
+	MonoTime timeStart;
 public:
+
+	@property ulong time()
+	{
+		ulong result;
+		(MonoTime.currTime - timeStart).split!"usecs"(result);
+		return result;
+	}
 
 	@property bool running()
 	{
 		return _running;
 	}
 
-	@property void running(bool value)
-	{
-		_running = false;
-	}
-
-	@property void hertz(uint value)
+	@property void logicFrequency(uint value)
 	{
 		logicDelta = 1000_000 / value;
 	}
 
+	/**
+	 * Time elapsed per step, in seconds.
+	 */
 	@property double stepSize()
 	{
 		return cast(double)(logicDelta) / 1000000.0;
 	}
 
-	///Graphical frame interpolation factor
+
+
+
+	/**
+	 * Step interpolation factor (inter-frame time)
+	 * 
+	 * Implementing a draw routine with interpolation can 
+	 * be quite challenging, but it has many benefits.
+	 * Most notably, it allows the game to run smoothly
+	 * with different graphical and logical frequencies.
+	 * 
+	 * It also allows true motion blur, though combining 
+	 * the two is nontrivial, since a logical update may
+	 * intersect the duration of a frame.
+	 * 
+	 * If the logical and graphical frequencies match, this 
+	 * should always be roughly 1.0. 
+	 */
 	@property double frameTime()
 	{
-		return 1.0 - cast(double)(logicTime - time) / cast(double)logicDelta;
+		//double sif = 1.0 - cast(double)(logicTime - time) / cast(double)logicDelta;
+		//assert(0.0 <= sif && sif <= 1.0, "invalid frameTime of "~to!string(sif));
+		return 1.0;
 	}
+
+	/*
+	 * Question: If logical and graphical frequencies match,
+	 * and the game is performing well, why wouldn't it always 
+	 * give SIF = 1.0?
+	 * 
+	 * To support motion blur, indicate frame times to draw,
+	 * and when to start and stop accumulating. */
 
 	void start()
 	{
 		_running = true;
-		time = 0;
 		logicTime = 0;
-		realTime = 0;
-		steps = 0;
-		tdStart = TickDuration.currSystemTick;
+		timeStart = MonoTime.currTime;
 	}
 
 	bool step()
 	{
 		if(!_running) return false;
 
-		time += realStep();
-
 		//If logic is behind time..
 		if(logicTime < time)
 		{
 			//If substeps remain
-			if(steps < stepMax)
+			if( (time - logicStart) < logicMax)
 			{
-				steps++;
 				logicTime += logicDelta;
 				return true;
 			}
-			else //Logic is unrecoverably slow. Jump back in time.
+			else //Logic is unrecoverably slow. Jump through time.
 			{
-				time = logicTime;
+				logicTime = time;
 			}
 		}
 
 		return false;
 	}
 
+	bool loop()
+	{
+		logicStart = time;
+		return _running;
+	}
+
+	void stop()
+	{
+		_running = false;
+	}
+
+	/**
+	 * Sleep until the next logic update is due.
+	 * 
+	 * This will busy-wait if the thread under-sleeps,
+	 * a necessary evil to provide correct behaviour.
+	 * 
+	 * If vsync is on, this shouldn't be called.
+	 */
 	void sleep()
 	{
-		//Sleep until real time matches game time
+		//Sleep to catch up to the logic time
 		long overTime = logicTime - time;
+
 		if(0 < overTime)
 		{
-			Thread.sleep(dur!"usecs"(overTime));
+			//Thread.sleep(dur!"usecs"(overTime));
+			Thread.sleep(overTime.usecs);
+			//Absorb undersleep - punish imprecision
+			while(time <= logicTime) asm { rep; nop; }
 		}
-
-		//Using vsync is optimal.
-		steps = 0;
 	}
 }
