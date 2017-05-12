@@ -393,9 +393,9 @@ public void Delete(T)(T* that) if(isUnmanagedType!T && !is(T == class))
  * reference is aliased so the struct can be used as if 
  * it were the referent.
  */
-template W(T)
+template R(T)
 {
-	alias W = Reference!("W", T);
+	alias R = Reference!("R", T);
 }
 
 /**
@@ -416,9 +416,9 @@ template W(T)
  * and check it !is null, before directly using
  * any native reference.
  */
-template R(T)
+template W(T)
 {
-	alias R = Reference!("R", T);
+	alias W = Reference!("W", T);
 }
 
 struct Reference(string C, T) if((C == "R" || C == "W") && isReferentType!T)
