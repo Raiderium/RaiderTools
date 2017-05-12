@@ -34,7 +34,7 @@ import core.stdc.string : memcpy;
  * Only access them when you know they are valid.
  * There is no way to check if a pocket is valid.
  */
-class Bag(T)
+@RC class Bag(T)
 {private:
 	Array!T data;
 	Array!(Array!(Tag!T)) workerData;
@@ -109,7 +109,7 @@ struct Pocket(T)
 {private:
 	shared uint size; //Number of items in this pocket
 	uint merged; //Counts items as they are moved from worker storage to the merged array
-	T* data; //Pointer into the merged array
+	@NotGarbage T* data; //Pointer into the merged array
 
 public:
 	void clear()
@@ -125,6 +125,11 @@ public:
 
 unittest
 {
+	static assert(!hasGarbage!(Bag!uint));
+	static assert(!hasGarbage!(Bag!(uint*)));
+	static assert(!hasGarbage!(Pocket!uint));
+	static assert(!hasGarbage!(Pocket!(uint*)));
+
 	auto bag = New!(Bag!uint);
 	Pocket!uint a, b, c;
 
