@@ -32,6 +32,16 @@ public:
 		condBarrier = new core.sync.barrier.Barrier(size);
 	}
 
+	/* TODO Compare with core.internal.spinlock
+	 * Points of note:
+	 * - Cacheline alignment with align(64)
+	 * - rep nop only static if (X86) (applies to all usage of rep; nop;)
+	 * - Unlocks with MemoryOrder.rel ..?
+	 * - Backoff strategies
+	 * Perhaps spinlocking is always a bad idea for a thread barrier?
+	 * Profile by comparing to a sync-primitive based implementation.
+	 */
+	
 	void wait()
 	{
 		//Wait for a slot.
