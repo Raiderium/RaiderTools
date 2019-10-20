@@ -44,8 +44,8 @@ public:
 	this()
 	{
 		workerData.size = tidMax;
-		data.cached = true;
-		foreach(tags; workerData) tags.cached = true;
+		data.ratchet = true;
+		foreach(tags; workerData) tags.ratchet = true;
 	}
 
 	/**

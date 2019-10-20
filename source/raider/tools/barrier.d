@@ -57,6 +57,8 @@ public:
 		while(slots && !goSleep) { asm { rep; nop; } }
 		if(goSleep) condBarrier.wait;
 
+		//TODO If a thread crashes, the rest end up waiting endlessly. goSleep is insufficient; have a maximum spinning time.
+
 		//Last to leave
 		if(atomicOp!"+="(souls, 1) == size)
 		{

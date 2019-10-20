@@ -1,0 +1,8 @@
+name "raider-tools"
+version "0.0.1"
+description "A small library of tools."
+homepage "https://github.com/Raiderium/RaiderTools"
+license "MIT"
+authors "Aiden Sibley"
+targetName "RaiderTools"
+targetPath "lib"

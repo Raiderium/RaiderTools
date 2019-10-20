@@ -1,5 +1,6 @@
 module raider.tools.looper;
 
+import raider.tools.reference;
 import core.thread;
 import core.time;
 import std.conv;
@@ -21,7 +22,7 @@ import std.conv;
  * 
  * Use looper.frameTime to interpolate graphics between the last two logic updates
  */
-class Looper
+@RC class Looper
 {private:
 	//All times are in microseconds
 	ulong logicTime = 0; 		//Logical time elapsed

@@ -22,7 +22,7 @@ __gshared
 	Array!Thread threads;
 }
 
-//Worker threads run this function.
+///Worker threads run this function.
 void worker()
 {
 	while(true)
@@ -40,9 +40,14 @@ void worker()
  */
 public void parallelTask(void delegate() task)
 {
+	//TODO
+	//If task called while task already running, complete in current thread.
+	//This is not a matter of checking tid, but 'work is null'.
+	//However, it needs to be suitable synchronised..
+    
 	assert(tid == 0);
 	assert(work is null);
-	
+    
 	work = task;
 	barrier.wait;
 	work();
@@ -56,22 +61,22 @@ shared static this()
 	tidMax = threadsPerCPU;
 	tid = 0; //Main thread has tid 0.
 	barrier = new Barrier(tidMax);
-
+    
 	foreach(x; 1..tidMax)
 	{
 		Thread thread = new Thread(&worker).start;
 		thread.isDaemon = true;
 		threads.add(thread);
 	}
-
+    
 	//Initialise tid and set core affinity
 	shared int _tid = 0;
-
+    
 	parallelTask(
 		delegate void()
 		{
 			if(tid == -1) tid = atomicOp!"+="(_tid, 1);
-
+            
 			//Lock to core
 			version(Windows)
 			{
@@ -79,7 +84,7 @@ shared static this()
 					assert(false, "Failed to set thread affinity");
 			}
 		});
-
+        
 	//Put workers to sleep.
 	barrier.sleep;
 }
@@ -108,10 +113,27 @@ void parallelSleep()
 
 public:
 
+
+//unitise: Break a range into chunks. Lockless popFront. There's probably no standard library thing for this
+//Oh hey! That would remove the prohibitive overhead of delegate calls!
+//But then what happens to the automatic unitization?
+//There's unitization for the ALGORITHM and unitization for the PARALLEL BALANCING.
+//Have both.
+
 /**
  * Parallel for-each.
  * 
- * Operates on the Array type only.
+ * Operates on the Array type only. TODO WHY?
+ * It is RATHER IMPORTANT to support non-random-access ranges.
+ * There are so many ways to create tasks in parallel.
+ * Case: Gnomesorting sections of an array.
+ * This should be a one-liner.
+ * 1: A generator that makes items that are smaller ranges. WITHOUT allocating an actual range of items.
+ * 2. A body that gnomesorts.
+ * 
+ * Unit = 0 is meaningless if the range has no length value.
+ * popFront must be thread-safe.
+ * 
  * Does not provide the index of items.
  * 
  * foreach(item; parallel(array)) {  }
@@ -126,8 +148,9 @@ public:
  * This is usually preferable. Spin waiting is only
  * useful with small, carefully balanced workloads.
  * 
- * Call parallel() from the main thread only.
- * Workers cannot create new tasks.
+ * If parallel() is used when a task is already
+ * active, or from an external thread, it runs in
+ * the current thread only.
  */
 auto parallel(T)(ref Array!T array, size_t unit = 0, bool sleep = true)
 {
@@ -137,36 +160,36 @@ auto parallel(T)(ref Array!T array, size_t unit = 0, bool sleep = true)
 		size_t size;
 		size_t unit;
 		bool sleep;
-		
+        
 		int delegate(ref T) the_delegate;
-		
+        
 		shared size_t x;
-		
+        
 		void the_loop()
 		{
 			//Warm start
 			size_t x0 = unit * tid;
 			size_t x1 = x0 + unit;
-			
+            
 			while(true)
 			{
 				if(x0 >= size) break;
 				if(x1 > size) x1 = size;
-				foreach(i; x0..x1) the_delegate(data[i]);
-				
+				foreach(i; x0..x1) the_delegate(data[i]); //Also support popFront
+                
 				x1 = atomicOp!"+="(x, unit);
 				x0 = x1 - unit;
 			}
 		}
-		
+        
 		int opApply(int delegate(ref T) dg)
 		{
 			//Ceiling division
 			if(unit == 0) unit = (size / tidMax) + (size % tidMax != 0);
-			
+            
 			//Warm start
 			x = tidMax * unit;
-			
+            
 			the_delegate = dg;
 			parallelTask(&the_loop);
 			if(sleep) parallelSleep;
@@ -174,13 +197,10 @@ auto parallel(T)(ref Array!T array, size_t unit = 0, bool sleep = true)
 		}
 	} //it's funny because this is a voldemort type
 	//laugh at my jokes >:(
-
+    
 	ParallelForeach pf = {array.ptr, array.size, unit, sleep};
 	return pf;
 }
-
-//TODO Implement mixin-based parallel() to remove delegate invocation overhead
-//TODO Revert to sane parallel() when the mixin becomes a mind-melting super-mistake
 
 unittest
 {

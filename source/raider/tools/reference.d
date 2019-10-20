@@ -3,11 +3,11 @@
  * 
  * Provides garbage collection based on reference
  * counting or manual management instead of tracing.
- * This gives a tight object lifespan with guaranteed 
+ * This gives a tight object lifespan with guaranteed
  * destruction and (in practice) smaller processing bursts.
  * 
  * This is useful for games because D currently has a
- * stop-the-world tracing collector. The work bunches 
+ * stop-the-world tracing collector. The work bunches
  * up into frame-shattering chunks, causing the game
  * to either pause intermittently or lose considerable
  * time to running the collector once per frame for
@@ -15,13 +15,13 @@
  * counting are preferable to those of the collector.
  * 
  * - Thread safe and lockless.
- * - Supports strong and weak references.
- * - Statically prohibits strong reference cycles.
+ * - Supports strong, weak and native references.
+ * - Adds ranges to GC as necessary.
  * - Does not support interior pointers.
  * - Uses malloc; allocator injection is TODO.
  * 
- * To use this module, add the @RC (Reference-Counted)
- * attribute to a class, or @UM (UnManaged) to either 
+ * To use this module, add the @RC (Reference Counted)
+ * attribute to a class, or @UM (UnManaged) to either
  * a struct or class. Then call New!T(args).
  * 
  * For reference-counted classes, New returns a strong
@@ -30,23 +30,23 @@
  * the reference is copied or destroyed, the reference
  * count is incremented and decremented accordingly.
  * 
- * This strong reference can be cast to a weak (W!T) 
+ * This strong reference can be cast to a weak (W!T)
  * reference (no alias this), or a native reference.
  * Native references to RC objects are equivalent to
  * dumb pointers and should be used for the majority
  * of variables, whenever you can guarantee a strong
  * reference exists to keep them alive.
  * 
- * For unmanaged types, New returns a native reference 
- * or pointer, which you must pass to a corresponding 
+ * For unmanaged types, New returns a native reference
+ * or pointer, which you must pass to a corresponding
  * call to Delete. Delete won't accept references to an
  * interface or non-final class because it must determine
- * at compile-time if the object has garbage or not.
+ * at compile time if the object has garbage or not.
  * 
- * The D garbage collector is made aware of memory if it 
- * contains potential indirections to GC-managed memory - 
+ * The D garbage collector is made aware of memory if it
+ * contains potential indirections to GC-managed memory -
  * that is, pointers, references, arrays, delegates, etc.
- * To avoid the overhead of adding and removing scanned 
+ * To avoid the overhead of adding and removing scanned
  * ranges, don't store things the GC cares about.
  * 
  * You can assert(!hasGarbage!T) to check if a type is clean,
@@ -54,7 +54,7 @@
  * they won't lead to GC memory.
  * 
  * @RC and @UM types are trusted to be allocated through
- * New, therefore native pointers and references to them 
+ * New, therefore native pointers and references to them
  * are not considered garbage. Needless to say, don't betray
  * that trust by using operator new.
  * 
@@ -63,45 +63,33 @@
  * don't have it, they will be unusable in R!T and W!T,
  * and native references will be considered garbage.
  * An @RC superclass or interface must guarantee none of
- * its inheritors are allocated with operator new.
+ * its derived classes are allocated with operator new.
+ * 
+ * Strong reference cycles are prohibited. No system of 
+ * types should be capable of creating a cycle. Use weak 
+ * references to break them.
  * 
  * Just to be clear, this module aims to minimise GC use,
- * not prohibit it entirely. Sometimes it is valuable or 
- * inevitable, particularly with strings and exceptions. 
- * But, by using reference counts where they, ah, count, 
+ * not prohibit it entirely. Sometimes it is valuable or
+ * inevitable, particularly with strings and exceptions.
+ * But, by using reference counts where they, ah, count,
  * we make our games smoother.
  * 
- * RC references are not compatible with any system that 
- * neglects to handle struct (de)construction and copying 
- * correctly. At time of writing that includes builtin 
- * associative arrays, the 'is' operator (specific cases), 
- * and struct initialisers (!).
+ * RC references are not compatible with any system that
+ * subverts normal struct (de)construction and copying.
+ * At time of writing that includes builtin associative
+ * arrays, the 'is' operator, and struct initialisers (!).
  */
 module raider.tools.reference;
 
-/*
- * Huge TODO: Incorporate std.experimental.allocator.
- * This will allow to select situation-appropriate 
- * allocation strategies.
- * 
- * This component of Phobos was approved July 25th 2015
- * to unanimous approval. It is an exceptionally useful
- * application of D's template mechanisms. It absolutely
- * must be leveraged before a single line of reinvented
- * free-list or bitmap code appears.
- * 
- * Notes on implementation:
- * Use quantizer to replace capacity-doubling in tools.array.
- */
-
 import std.conv : emplace;
-import std.traits;
-import core.atomic : atomicOp, atomicLoad, MemoryOrder, cas;
+import std.traits : isAggregateType, hasUDA, isAbstractClass,
+	isFinalClass, isBasicType, isStaticArray;
+import core.atomic : atomicOp, atomicLoad, cas;
 import core.exception : onOutOfMemoryError;
 import std.algorithm : swap;
 import core.memory : GC;
-import core.stdc.stdlib : malloc, mfree = free; //replace with mallocator
-//import std.experimental.allocator.mallocator : Mallocator;
+import core.stdc.stdlib : malloc, mfree = free;
 
 /**
  * Attribute indicates a class or interface is reference-counted.
@@ -111,7 +99,7 @@ enum RC;
 /**
  * Attribute indicates a class, struct or union is unmanaged.
  */
-enum UM; 
+enum UM;
 
 /**
  * Attribute indicates a field should be skipped for garbage tracing purposes.
@@ -121,11 +109,11 @@ enum NotGarbage;
 /**
  * True if a type can be instantiated with New.
  */
-template isNonGCType(T) 
+template isNonGCType(T)
 {
 	static if(isAggregateType!T)
 		static assert(!(hasUDA!(T, RC) && hasUDA!(T, UM)), T~" can't have both @RC and @UM.");
-
+    
 	//RC classes must be non-abstract.
 	static if(is(T == class) && hasUDA!(T, RC))
 		enum isNonGCType = !isAbstractClass!T;
@@ -141,7 +129,6 @@ template isUnmanagedType(T)
 	//UM classes must be final for static garbage analysis.
 	static if(is(T == class) && hasUDA!(T, UM))
 		enum isUnmanagedType = isFinalClass!T;
-	
 	else static if(is(T == struct) || is(T == union))
 		enum isUnmanagedType = hasUDA!(T, UM);
 	else
@@ -149,19 +136,21 @@ template isUnmanagedType(T)
 }
 
 /**
- * True if a type can be used as a strong or weak reference.
+ * True if a type can be the target of a strong or weak reference.
  */
 template isReferentType(T)
 {
-	enum isReferentType = (is(T == class) || is(T == interface)) && 
-		(hasUDA!(T, RC) && !hasUDA!(T, UM));
+	static if(is(T == class) || is(T == interface))
+		enum isReferentType = (hasUDA!(T, RC) && !hasUDA!(T, UM));
+	else
+		enum isReferentType = false;
 }
 
 /**
  * True if a symbol or type is or contains tracable garbage.
  * 
- * Errs on the side of caution. Unrecognised types are assumed 
- * to be worth tracing. If you're absolutely sure a field does 
+ * Errs on the side of caution. Unrecognised types are assumed
+ * to be worth tracing. If you're absolutely sure a field does
  * not lead to garbage-collected memory, use @NotGarbage.
  * 
  * Native references and pointers to @RC or @UM types are not
@@ -170,13 +159,13 @@ template isReferentType(T)
 template hasGarbage(T...) if(T.length == 1)
 {
 	enum hasGarbage = Impl!T;
-
+    
 	//static required otherwise there are two context pointers
-	static template Impl(T...) 
+	static template Impl(T...)
 	{
 		static if (!T.length)
 			enum Impl = false;
-		
+        
 		//Expand classes and all base classes.
 		else static if (is(T[0] P == super))
 		{
@@ -190,32 +179,32 @@ template hasGarbage(T...) if(T.length == 1)
 			}
 			else enum Impl = false;
 		}
-
+        
 		//Ignore @NotGarbage symbols.
 		else static if (is(typeof(T[0])) && hasUDA!(T[0], NotGarbage))
 			enum Impl = Impl!(T[1 .. $]);
-
+        
 		//Inspect types..
 		else static if (is(typeof(T[0]) U) || is(T[0] U))
 		{
 			//Expand structs and unions.
 			static if (is(U == struct) || is(U == union))
 				enum Impl = Impl!(U.tupleof) || Impl!(T[1 .. $]);
-			
+            
 			//Ignore pointers if the target type is struct/union @UM, immutable, or a function.
 			else static if (is(U P : P*))
 			{
-				static if ((isUnmanagedType!P && !is(P == class)) || 
+				static if ((isUnmanagedType!P && !is(P == class)) ||
 						is(P == immutable) || is(P == function))
 					enum Impl = Impl!(T[1 .. $]);
 				else
 					enum Impl = true;
 			}
-			
+            
 			//Ignore basic types.
 			else static if (isBasicType!U)
 				enum Impl = Impl!(T[1 .. $]);
-			
+            
 			//Ignore references if the class/interface is referent-valid or unmanaged.
 			else static if (is(U == class) || is(U == interface))
 			{
@@ -224,57 +213,64 @@ template hasGarbage(T...) if(T.length == 1)
 				else
 					enum Impl = true;
 			}
-			
+            
 			//Instantiate to inspect the item type of a static array.
 			else static if (isStaticArray!U && is(U : E[N], E, size_t N))
 				enum Impl = Impl!(E, T[1 .. $]);
-			
+            
 			//Considered garbage: associative arrays, dynamic arrays,
-			//interfaces, and anything not explicitly excused.
+			//and anything not explicitly excused.
 			else
 				enum Impl = true;
 		}
 		else
-			static assert(0, "There's something that isn't a symbol or type?! Buwhaaa.. ");
+			static assert(0, "AUGH WHAT IS "~T[0]~"? I'M SO CONFUSED");
 	}
 }
+
+//TODO NOW:
+//hasCycles.
+//It can only check ONE class at a time, but there is a place that 
+//one class can be checked at a time - New.
+//Static reference cycle detection is back. And now it's explicit!
+//The code can be tighter, no weird 'fields' instantiation.. lovely.
 
 unittest
 {
 	static assert(!hasGarbage!int);
 	static assert( hasGarbage!(int**));
-
+    
 	abstract class A { uint* ptr; }
 	static assert( hasGarbage!A);
-
+    
 	interface I {}
 	static assert(!hasGarbage!I);
-
+    
 	I i;
 	static assert( hasGarbage!(i));
-
+    
 	@RC final class B : A, I { }
 	static assert( hasGarbage!B);
 	static assert(!hasGarbage!(R!B));
-
+    
 	B b;
 	static assert(!hasGarbage!(b));
-
+    
 	B* bp;
 	static assert( hasGarbage!(bp));
-
+    
 	class C { float[2] f; }
 	static assert(!hasGarbage!C);
-
+    
 	C c;
 	static assert( hasGarbage!(c));
-
+    
 	struct D { D* ptr; }
 	static assert( hasGarbage!D);
-
+    
 	@UM struct E { E* ptr; uint function (uint) func; }
 	static assert(!hasGarbage!E);
-
+    
 	static assert(!hasGarbage!(E*));
 	static assert( hasGarbage!(E**));
 }
@@ -284,12 +280,13 @@ private struct Header
 	uint strongCount = 1;
 	ushort weakCount = 1;
 	bool isTraced;
+	//bool moveLock;
 }
 
 static assert(Header.sizeof == 8);
 /* Header could be as small as 4 bytes with bitfield packing,
  * but for the sake of CAS performance, simplicity and 64-bit
- * alignment and the fact that it is unlikely to ever have an 
+ * alignment and the fact that it is unlikely to ever have an
  * appreciable impact on memory resources...
  * ...we move on with our dignity intact
  */
@@ -298,7 +295,7 @@ static assert(Header.sizeof == 8);
  * Allocates and constructs an object.
  * 
  * If the type is @UM (UnManaged), this is a simple RAII dealie
- * supporting both class and struct types. A corresponding call 
+ * supporting both class and struct types. A corresponding call
  * to Delete is necessary or the memory will leak. It returns a
  * native reference for classes, and a pointer for structs. The
  * classes must be final, to avoid polymorphic garbage issues.
@@ -313,43 +310,43 @@ public auto New(T, Args...)(auto ref Args args) if(isNonGCType!T)
 {
 	//Get upset if a type can't be instantiated (nested, abstract, etc)
 	if(false) auto t = new T(args);
-
-	//The irony is not lost on me that the first line of 
+    
+	//The irony is not lost on me that the first line of
 	//New contains an unreachable call to operator new
-
+    
 	//Find the space required for the type.
 	static if(is(T == class))
 		enum size = __traits(classInstanceSize, T);
 	else
 		enum size = T.sizeof;
-
-	//Add the header. 
+    
+	//Add the header.
 	enum allocSize = size + (hasUDA!(T, RC) ? Header.sizeof : 0);
-
+    
 	//Allocate (and never forget that malloc(0) is a thing)
-	void* m = malloc(allocSize); 
+	void* m = malloc(allocSize);
 	if(!m) onOutOfMemoryError;
 	scope(failure) mfree(m);
-
+    
 	//Obtain pointers to header and object
 	static if(hasUDA!(T, RC))
 	{
 		Header* header = cast(Header*)m;
 		void* state = m + Header.sizeof;
-
+        
 		//Init header
 		*header = Header.init;
 	}
 	else alias state = m;
-		
+    
 	//Got anything the GC needs to worry about?
 	static if(hasGarbage!T)
 	{
 		GC.addRange(state, size);
-		static if(hasUDA!(T, RC)) header.isTraced = true; 
+		static if(hasUDA!(T, RC)) header.isTraced = true;
 		scope(failure) GC.removeRange(state);
 	}
-
+    
 	//Construct with emplace
 	static if(hasUDA!(T, RC))
 	{
@@ -388,11 +385,12 @@ public void Delete(T)(T* that) if(isUnmanagedType!T && !is(T == class))
  * 
  * When there are no more strong references to an object
  * it is immediately deconstructed.
- *
- * This struct implements incref/decref semantics. The 
- * reference is aliased so the struct can be used as if 
+ * 
+ * This struct implements incref/decref semantics. The
+ * reference is aliased so the struct can be used as if
  * it were the referent.
  */
+
 template R(T)
 {
 	alias R = Reference!("R", T);
@@ -428,21 +426,20 @@ struct Reference(string C, T) if((C == "R" || C == "W") && isReferentType!T)
 		public T _referent = null;
 		@NotGarbage void* _referent_void;
 	}
-
+    
+	//FIXME Following bugzilla 14390 in 2.068.0, accessing T.tupleof no longer
+	//works to statically detect strong reference cycles - there are false
+	//positives if the chain involves more than two classes.
+	//I wonder which is the lesser evil?
+    
 	//Interface referents don't have the same address as the object
-	auto _object_void()
-	{
-		return cast(void*)cast(Object)_referent;
-	}
-
+	auto _object_void() { return cast(void*)cast(Object)_referent; }
+    
 	//Header hides before the object
-	ref shared(Header) header() {
-		//subtract 1 and dereference
-		return *((cast(shared(Header)*)_object_void) - 1);
-	} 
-
+	ref shared(Header) header() { return *((cast(shared(Header)*)_object_void) - 1); }
+    
 public:
-
+    
 	//Make the reference behave loosely like the referent
 	//I hesitate to attempt to clarify exactly *how* loosely
 	static if(C == "R")
@@ -450,88 +447,80 @@ public:
 		alias _referent this;
 		auto opIndex(A...)(A args) { return _referent[args]; }
 	}
-
+    
 	//Concise casting between reference types.
-	//Templated to instantiate at call site to avoid cyclic template evaluation failure.
-	@property R!T _r()() { return R!T(_referent); }
-	@property W!T _w()() { return W!T(_referent); }
-
+	@property R!T _r() { return R!T(_referent); }
+	@property W!T _w() { return W!T(_referent); }
+    
 	//Read-access to reference counts
 	@property auto _rc() { return header.strongCount; }
 	@property auto _wc() { return header.weakCount - (header.strongCount != 0); }
-
-	//ctor with covariant reference
-	this(D : Reference!(E, A), string E, A:T)(D that)
+    
+	this(A)(const A that) if(is(A == Reference!Args, Args...)
+		|| (is(A:T) && (is(A == class) || is(A == interface))))
 	{
-		//Unexpected: isInstanceOf!(Reference, D) is weirdly false.
-		//Not sure if this is intended behaviour.
-		//Loss of information?
-		static assert(is(D == Reference!(E, A)));
-		static assert(!isInstanceOf!(Reference, D));
-
-		_referent = that._referent;
-		static if(C == "R" && E == "W") _acquire;
-		static if(C == "R" && E == "R") _incref;
-		static if(C == "W") _incwef;
-
-
+		static if(is(A == Reference!(E, X), string E, X))
+		{
+			static if(is(X:T))
+			{
+				_referent = cast(X) that._referent; //Casting to remove the const.. fun.
+				static if(C == "R" && E == "W") _acquire;
+				static if(C == "R" && E == "R") _incref;
+				static if(C == "W") _incwef;
+			}
+			else static if(is(T:X))
+			{
+				static assert(0, "Cannot implicitly cast " ~ X.stringof ~ " to " ~ T.stringof);
+			}
+		}
+		else static if(is(A:T) && (is(A == class) || is(A == interface)))
+		{
+			_referent = cast(A) that;
+			static if(C == "R") _acquire; else _incwef;
+		}
+		else static assert(0);
 	}
-
-	//ctor with covariant native reference
-	this(A:T)(A that) if(is(A == class) || is(A == interface))
-	{
-		_referent = that;
-		static if(C == "R") _acquire; else _incwef;
-	}
-
+    
 	this(this) { static if(C == "R") _incref; else _incwef; }
 	~this() { static if(C == "R") _decref; else _decwef;}
-
-	//Assign null
-	void opAssign(typeof(null) wut)
+    
+	void opAssign(A)(auto ref A that)
 	{
-		static if(C == "R") _decref; else _decwef;
-		_referent = null;
-	}
+		static if(is(A == typeof(null)))
+		{
+			static if(C == "R") _decref; else _decwef;
+			_referent = null;
+		}
+		else
+		{
+			auto tmp = Reference!(C, T)(that);
+			swap(_referent, tmp._referent);
+		}
 
-	//Assign a covariant reference
-	void opAssign(D : Reference!(E, A), string E, A:T)(auto ref D rhs) //const..?
-	{
-		//Slightly modified copy-and-swap idiom.
-		//We do want a copy of the rhs, but only as our strength & type of reference.
-		//auto ref avoids the unnecessary copy whenever possible.
-		auto tmp = Reference!(C, T)(rhs); //covariant constructor
-		swap(_referent, tmp._referent); //tmp disposes of our reference, as normal
 	}
-
-	//Assign a covariant native reference
-	void opAssign(A:T)(A rhs) if(is(A == class))
-	{
-		auto tmp = Reference!(C, T)(rhs);
-		swap(_referent, tmp._referent);
-	}
-
-	//Cast to covariant references of different strengths
-	auto opCast(D : Reference!(E, A), string E, A:T)() const 
-	{
-		//this assumes a weak source even if it's strong :I
-		return D(cast(A)_referent); 
-	}
-
+    
 	A opCast(A)() const
-	{	
-		static if(is(A == bool))
-			return _referent is null ? false : true; 
+	{
+		static if(is(A == Reference!(E, X), string E, X))
+		{
+			static if(is(X:T)) return A(cast(X)_referent);
+			else static if(is(T:X)) return A(_referent);
+		}
+		else static if(is(A == bool))
+			return _referent is null ? false : true;
 		//else static if(is(A == string))
 		//	return to!string(_referent); //this should work OUTSIDE.
-		//Try hijacking it?
-		else
-			return cast(A)_referent;
+		else return cast(A)_referent;
 	}
-	
-
+    
+	string toString()
+	{
+		import std.conv : to;
+		return to!string(_referent);
+	}
+    
 private:
-
+    
 	static if(C == "R")
 	{
 		void _acquire()
@@ -542,18 +531,18 @@ private:
 				uint get, set;
 				do
 				{
-					get = set = atomicLoad!(MemoryOrder.raw)(header.strongCount);
+					get = set = atomicLoad(header.strongCount);
 					acquire = set != 0;
-					set += acquire; 
+					set += acquire;
 				}
 				while(!cas(&header.strongCount, get, set));
-				
+                
 				version(assert) if(acquire) assert(set != 0, "Strong refcount overflow (!)");
-				
+                
 				if(!acquire) _referent = null;
 			}
 		}
-	 
+        
 		void _incref()
 		{
 			if(_referent)
@@ -562,7 +551,7 @@ private:
 				assert(rc != 0, "Strong refcount overflow (!)");
 			}
 		}
-
+        
 		void _decref()
 		{
 			if(_referent)
@@ -574,14 +563,14 @@ private:
 				if(rc == 0) { _dtor; _decwef; }
 			}
 		}
-
+        
 		void _dtor()
 		{
 			//Destroy referent. Note that destroy() assigns null.
-			auto limbo = _referent_void;
+			auto tmp = _referent_void;
 			destroy(_referent);
 			//We actually want to keep the memory around a while, destroy(). Be patient.
-			_referent_void = limbo; 
+			_referent_void = tmp;
 		}
 	}
 	else
@@ -595,7 +584,7 @@ private:
 			}
 		}
 	}
-
+    
 	void _decwef()
 	{
 		if(_referent)
@@ -605,19 +594,12 @@ private:
 			if(wc == 0) _free;
 		}
 	}
-
+    
 	void _free()
 	{
 		if(header.isTraced) GC.removeRange(_object_void);
 		mfree(_object_void - Header.sizeof);
 	}
-	
-	//Detect reference cycles
-	static if(C == "R" && !__traits(compiles, Fields!T))
-		static assert(0, "Reference cycle detected.");
-	// Why people continue to list reference cycles as a 
-	// reason to avoid reference counting is beyond me.
-	// People can be so afraid of describing ownership.
 }
 
 unittest
@@ -625,13 +607,25 @@ unittest
 	//A non-function scope is required for most of these tests.
 	struct S
 	{
+		//Unfortunately, strong reference cycles can no longer be detected statically.
+		//The following is illegal, at least on reference.d's authority.
 		@RC class C3 { R!C2 c2; }
-		@RC class C1 { W!C3 c3; } //Change to R!C3 to get a reference cycle error
+		@RC class C1 { R!C3 c3; }
 		@RC class C2 { R!C1 c1; }
-
+        
+		@RC class IssueA { }
+		@RC class IssueB : IssueA { }
+        
+		unittest
+		{
+			static assert(is(IssueB : IssueA));
+			auto issue = New!IssueB();
+			auto issue2 = cast(R!IssueA)issue;
+		}
+        
 		@RC class A { }
 		@RC class B : A { }
-
+        
 		unittest
 		{
 			auto r_b = New!B();  //strong = strong
@@ -639,67 +633,67 @@ unittest
 			r_a = r_b;           //strong = covariant strong
 			assert(r_a._referent_void == r_b._referent_void);
 			assert(r_a._rc == 2);
-
+            
 			W!A w_a = r_b;         //weak = covariant strong
 			W!B w_b = r_b;         //weak = strong
 			B n_b = r_b;         //native = strong
 			A n_a = r_b;         //native = covariant strong
-
+            
 			//Can't assign base to derived without explicit cast
 			static assert(!__traits(compiles, n_b = r_a));
 			n_b = cast(B)r_a; assert(n_b);
 			n_b = cast(R!B)r_a; assert(n_b);
-
+            
 			n_b = cast(B)w_b;    //native = weak (no referent aliasing, cast required)
 			r_b = n_b;           //strong = native
 			w_b = n_b;             //weak = native
-
+            
 			r_b = R!B(r_b);     //strong(strong)
-
+            
 			//Can't construct derived from base without explicit cast
 			static assert(!__traits(compiles, r_b = R!B(r_a)));
 			r_b = R!B(cast(R!B)r_a); assert(r_b);
-			     
+            
 			r_b = R!B(w_b);     //strong(weak)
 			r_a = R!A(w_b);     //strong(covariant weak)
 			r_b = R!B(n_b);     //strong(native)
 			n_a = R!B(w_b);     //native = covariant strong(weak)
-
+            
 			//No referent aliasing, cast required.
 			static assert(!__traits(compiles, n_a = W!B(r_b)));
-
+            
 			assert(w_b._rc == 2);
 			assert(w_b._wc == 2);
-
+            
 			//Acquire succeeds
 			r_b = w_b; assert(r_b);
 			r_b = n_b; assert(r_b);
 			r_b = R!B(w_b); assert(r_b);
 			r_b = R!B(n_b); assert(r_b);
-
-			r_b = null; 
+            
+			r_b = null;
 			r_a = null;
-
+            
 			//Object destroyed, but not freed
 			assert(w_b._rc == 0);
 			assert(w_b._wc == 2);
-
+            
 			//Acquire fails
 			r_b = w_b; assert(r_b is null);
 			r_b = n_b; assert(r_b is null);
 			r_b = R!B(w_b); assert(r_b is null);
 			r_b = R!B(n_b); assert(r_b is null);
-
+            
 			//is operator problem
 			auto b = New!B();
 			auto b_rc = b._rc;
 			//assert(b._r is b); //Fails to destroy the value returned from b._r
 			assert(b_rc == b._rc); //This will fail if the above is uncommented.
 		}
-
+        
 		@RC final class C { }
 		struct D { R!C foo; }
-
+        
 		unittest
 		{
 			//Struct initializer problem
@@ -710,11 +704,11 @@ unittest
 			//D d2 = { c }; //This creates an untracked reference and double-free occurs
 			assert(c._rc == 2); //This will pass even though d2 holds a reference
 		}
-
+        
 		@RC interface IA { }
 		@RC interface IB { }
 		@RC class E : IA, IB { }
-
+        
 		unittest
 		{
 			auto e = New!E();
@@ -728,10 +722,10 @@ unittest
 			assert(ia._rc == 3);
 			assert(ib._rc == 3);
 		}
-
+        
 		@UM interface IC { }
 		@UM final class F : IC { }
-
+        
 		unittest
 		{
 			auto f = New!F();
@@ -740,31 +734,36 @@ unittest
 			Delete(f);
 			static assert(!__traits(compiles, Delete(ic)));
 		}
-
-		@UM struct T { }
+        
+		@UM struct T { uint* garbage; }
 		@UM union U { uint x; float y; }
 		struct V { }
-
+        
+		static assert( hasGarbage!T);
+		static assert( hasGarbage!(T[4]));
+		static assert( hasGarbage!(T[]));
+		static assert(!hasGarbage!(T*));
+		T[4] tsa;
+		static assert( hasGarbage!(tsa));
+        
 		unittest
 		{
 			auto t = New!T();
 			assert(t);
 			Delete(t);
-
+            
 			T tv;
 			static assert(!__traits(compiles, Delete(tv)));
-
+            
 			auto u = New!U();
 			assert(u);
 			Delete(u);
-
+            
 			V* v;
 			static assert(!__traits(compiles, New!V()));
 			static assert(!__traits(compiles, Delete(v)));
 		}
 	}
-
-
 }
 
 /* 11-5-2017
@@ -782,7 +781,7 @@ unittest
  * - While strong references remain, a weak reference is implied.
  * 
  * This avoids checking 'when no strong or weak references remain',
- * which requires atomicity on two fields - usually implying DWCAS. 
+ * which requires atomicity on two fields - usually implying DWCAS.
  * It also guarantees the destroy-free ordering.
  * 
  * So. Here are the acquire and release operations.
@@ -791,7 +790,7 @@ unittest
  * 
  * Acquire strong:
  * If copying from another strong ref, just incref.
- * If promoting to strong from weak, incref if refs remain; 
+ * If promoting to strong from weak, incref if refs remain;
  * otherwise, fail to acquire. (A custom atomic increment.)
  * 
  * Acquire weak:
